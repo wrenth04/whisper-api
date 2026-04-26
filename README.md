@@ -38,19 +38,24 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 {"gpu_supported": false, "reason": "openvino_gpu_missing:['CPU']"}
 ```
 
-## Windows 打包（PyInstaller）
+## Windows 打包（Workflow 優先）
 
 如果你在 Windows 上遇到「Python 可以啟動，但 exe 的 `--check-gpu` 回傳 `openvino_gpu_missing:[]`」，通常是打包時少帶了 OpenVINO/faster-whisper 的 runtime 檔。
 
-本專案提供一個可直接執行的腳本：
+建議優先使用 GitHub Actions workflow：`.github/workflows/build-windows-exe.yml`。
+
+1. 到 GitHub Actions 手動觸發 **Build Windows EXE**（`workflow_dispatch`）。
+2. 下載 artifact `whisper-api-server-windows-exe`。
+3. 在 Windows 執行：
+
+```powershell
+.\whisper-api-server.exe --check-gpu
+```
+
+若你要在本機手動打包，也可用：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build_windows_exe.ps1
-```
-
-完成後執行：
-
-```powershell
 .\dist\whisper-api-server.exe --check-gpu
 ```
 
