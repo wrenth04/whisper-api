@@ -9,6 +9,10 @@ from typing import Literal, Optional
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
+def _is_macos_arm64() -> bool:
+    return sys.platform == "darwin" and os.uname().machine in {"arm64", "aarch64"}
+
+
 if __package__ in {None, ""}:
     sys.path.append(os.path.dirname(__file__))
     from schemas import (
@@ -18,7 +22,11 @@ if __package__ in {None, ""}:
         Segment,
         VerboseJsonTranscriptionResponse,
     )
-    from transcribe import GpuNotAvailableError, check_gpu_support, transcribe_audio
+
+    if _is_macos_arm64():
+        from transcribe_mac import GpuNotAvailableError, check_gpu_support, transcribe_audio
+    else:
+        from transcribe import GpuNotAvailableError, check_gpu_support, transcribe_audio
 else:
     from .schemas import (
         ErrorBody,
@@ -27,7 +35,11 @@ else:
         Segment,
         VerboseJsonTranscriptionResponse,
     )
-    from .transcribe import GpuNotAvailableError, check_gpu_support, transcribe_audio
+
+    if _is_macos_arm64():
+        from .transcribe_mac import GpuNotAvailableError, check_gpu_support, transcribe_audio
+    else:
+        from .transcribe import GpuNotAvailableError, check_gpu_support, transcribe_audio
 
 app = FastAPI(title="Whisper OpenAI-Compatible API")
 

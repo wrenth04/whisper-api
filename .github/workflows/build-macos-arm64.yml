@@ -1,0 +1,58 @@
+name: Build macOS ARM64 Binary
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - work
+    tags:
+      - 'v*'
+
+jobs:
+  build-macos-arm64:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build macOS arm64 executable
+        run: |
+          pyinstaller \
+            --noconfirm \
+            --clean \
+            --onefile \
+            --name whisper-api-server \
+            --collect-all openvino \
+            --collect-all faster_whisper \
+            --hidden-import openvino \
+            --hidden-import openvino.runtime \
+            --hidden-import faster_whisper \
+            app/main.py
+
+      - name: Package artifact
+        run: |
+          mkdir -p release
+          cp dist/whisper-api-server release/
+          chmod +x release/whisper-api-server
+          tar -czf whisper-api-server-macos-arm64.tar.gz -C release whisper-api-server
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisper-api-server-macos-arm64
+          path: |
+            dist/whisper-api-server
+            whisper-api-server-macos-arm64.tar.gz
