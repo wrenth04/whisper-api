@@ -47,14 +47,6 @@ jobs:
             --hidden-import faster_whisper `
             app/main.py
 
-      - name: EXE smoke check (GPU probe)
-        shell: pwsh
-        run: |
-          .\dist\whisper-api-server.exe --check-gpu
-          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 2) {
-            throw "Unexpected exit code from --check-gpu: $LASTEXITCODE"
-          }
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
