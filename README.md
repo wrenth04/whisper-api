@@ -44,6 +44,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 建議優先使用 GitHub Actions workflow：`.github/workflows/build-windows-exe.yml`。
 
+Linux amd64 版本可使用 workflow：`.github/workflows/build-linux-amd64.yml`（手動觸發或推送 `v*` tag）。artifact 會包含可執行檔與 `whisper-api-server-linux-amd64.tar.gz`。
+
 1. 到 GitHub Actions 手動觸發 **Build Windows EXE**（`workflow_dispatch`）。
 2. 下載 artifact `whisper-api-server-windows-exe`。
 3. 在 Windows 執行：
