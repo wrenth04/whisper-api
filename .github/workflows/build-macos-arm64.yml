@@ -28,6 +28,10 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pyinstaller
 
+      - name: Ensure OpenVINO is absent on macOS ARM64
+        run: |
+          python -m pip uninstall -y openvino openvino-dev || true
+
       - name: Build macOS arm64 executable
         run: |
           pyinstaller \
@@ -35,11 +39,10 @@ jobs:
             --clean \
             --onefile \
             --name whisper-api-server \
-            --collect-all openvino \
             --collect-all faster_whisper \
-            --hidden-import openvino \
-            --hidden-import openvino.runtime \
             --hidden-import faster_whisper \
+            --exclude-module openvino \
+            --exclude-module openvino.runtime \
             app/main.py
 
       - name: Package artifact

@@ -90,7 +90,7 @@ python -c "from openvino import Core; print(Core().available_devices)"
 |---|---|---|
 | Python | 3.10–3.12 (64-bit) | 建議使用 64-bit 環境 |
 | faster-whisper | `>=1.1.0,<2.0.0` | Whisper 推理 |
-| openvino | `>=2024.3.0,<2026.0.0` | OpenVINO Runtime 偵測與 Intel GPU 可見性判斷 |
+| openvino | `>=2024.3.0,<2026.0.0`（非 macOS ARM64） | OpenVINO Runtime 偵測與 Intel GPU 可見性判斷（Linux/Windows） |
 | Intel GPU Driver | 最新穩定版 | 需可被 OpenVINO `Core().available_devices` 探測到 `GPU` |
 | OS/平台 | Linux / Windows x86_64、macOS ARM64 | 非支援平台或缺驅動時通常會退回 CPU |
 
