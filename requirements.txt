@@ -4,3 +4,4 @@ python-multipart>=0.0.9,<1.0.0
 pydantic>=2.9.0,<3.0.0
 faster-whisper>=1.1.0,<2.0.0
 openvino>=2024.3.0,<2026.0.0
+mlx-whisper>=0.4.2; platform_system == 'Darwin' and platform_machine == 'arm64'
