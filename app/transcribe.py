@@ -59,9 +59,12 @@ def _resolve_device() -> RequestedDevice:
 
 def _probe_openvino_gpu() -> tuple[bool, str]:
     try:
-        from openvino.runtime import Core
+        from openvino import Core
     except Exception as exc:  # pragma: no cover - runtime dependent
-        return False, f"openvino.runtime_unavailable:{exc.__class__.__name__}"
+        try:
+            from openvino.runtime import Core
+        except Exception:
+            return False, f"openvino.runtime_unavailable:{exc.__class__.__name__}"
 
     try:
         devices = list(Core().available_devices)
