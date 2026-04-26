@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import json
 from typing import Literal, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -12,7 +14,7 @@ from app.schemas import (
     Segment,
     VerboseJsonTranscriptionResponse,
 )
-from app.transcribe import transcribe_audio
+from app.transcribe import GpuNotAvailableError, check_gpu_support, transcribe_audio
 
 app = FastAPI(title="Whisper OpenAI-Compatible API")
 
@@ -72,6 +74,7 @@ async def create_transcription(
     response_format: Literal["json", "verbose_json"] = Form("json"),
     temperature: float = Form(0.0),
     include_debug: bool = Form(False),
+    require_gpu: bool = Form(False),
 ):
     if not file.filename:
         raise ApiError("No audio file was provided.", code="missing_file")
@@ -83,14 +86,22 @@ async def create_transcription(
     if not audio_bytes:
         raise ApiError("Uploaded file is empty.", code="empty_file")
 
-    result = transcribe_audio(
-        audio_bytes=audio_bytes,
-        model_name=model,
-        language=language,
-        prompt=prompt,
-        temperature=temperature,
-        include_debug=include_debug,
-    )
+    try:
+        result = transcribe_audio(
+            audio_bytes=audio_bytes,
+            model_name=model,
+            language=language,
+            prompt=prompt,
+            temperature=temperature,
+            include_debug=include_debug,
+            require_gpu=require_gpu,
+        )
+    except GpuNotAvailableError as exc:
+        raise ApiError(
+            f"GPU check failed: {exc.reason}",
+            code="gpu_not_available",
+            status_code=400,
+        ) from exc
 
     if response_format == "json":
         return JsonTranscriptionResponse(text=result.text, debug=result.debug)
@@ -104,3 +115,26 @@ async def create_transcription(
         ],
         debug=result.debug,
     )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Whisper OpenAI-Compatible API")
+    parser.add_argument("--check-gpu", action="store_true", help="Only check GPU support and exit.")
+    parser.add_argument("--host", default="0.0.0.0", help="Host for uvicorn server.")
+    parser.add_argument("--port", type=int, default=8000, help="Port for uvicorn server.")
+    args = parser.parse_args()
+
+    if args.check_gpu:
+        supported, reason = check_gpu_support()
+        payload = {"gpu_supported": supported, "reason": reason}
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0 if supported else 2
+
+    import uvicorn
+
+    uvicorn.run("app.main:app", host=args.host, port=args.port)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

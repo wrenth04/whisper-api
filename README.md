@@ -12,10 +12,30 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### 打包/部署前必要 include 檢查
+
+此專案的必要 runtime 相依已包含在 `requirements.txt`（`faster-whisper`、`openvino`、`python-multipart` 等）。建議在打包前先做一次 import smoke test：
+
+```bash
+python -c "import fastapi, faster_whisper, openvino; print('imports_ok')"
+```
+
 ## 執行
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+若你是打包成 exe，現在可直接用：
+
+```bash
+./whisper-api --check-gpu
+```
+
+此模式只會做 GPU 探測並立即結束，不會啟動 API 服務。回傳範例：
+
+```json
+{"gpu_supported": false, "reason": "openvino_gpu_missing:['CPU']"}
 ```
 
 ## 裝置選擇與回退策略
@@ -74,6 +94,29 @@ curl http://127.0.0.1:8000/v1/audio/transcriptions \
   }
 }
 ```
+
+## GPU 支援確認參數（新增）
+
+API 新增 `require_gpu`（`true/false`，預設 `false`）：
+
+- `require_gpu=false`：維持原本策略，可回退 CPU。
+- `require_gpu=true`：若無法解析為 Intel GPU，會直接回 `400 gpu_not_available`，可用於 CI 或部署驗收。
+
+建議驗證指令：
+
+```bash
+WHISPER_DEVICE=intel_gpu curl http://127.0.0.1:8000/v1/audio/transcriptions \
+  -X POST \
+  -F "file=@/path/to/audio.wav" \
+  -F "model=small" \
+  -F "response_format=json" \
+  -F "include_debug=true" \
+  -F "require_gpu=true"
+```
+
+判斷方式：
+- 成功：`debug.resolved` 為 `intel_gpu`（且 `backend` 為 `openvino`）。
+- 失敗：回傳 `400`，`error.code = "gpu_not_available"`，訊息包含原因（例如 `openvino_gpu_missing`）。
 
 ## 錯誤格式
 

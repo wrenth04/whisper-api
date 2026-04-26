@@ -40,6 +40,12 @@ class TranscriptionResult:
     debug: Optional[dict[str, str]] = None
 
 
+class GpuNotAvailableError(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"GPU not available: {reason}")
+
+
 _MODEL_CACHE: dict[str, WhisperModel] = {}
 
 
@@ -65,6 +71,10 @@ def _probe_openvino_gpu() -> tuple[bool, str]:
     if "GPU" in devices:
         return True, f"openvino_gpu_available:{devices}"
     return False, f"openvino_gpu_missing:{devices}"
+
+
+def check_gpu_support() -> tuple[bool, str]:
+    return _probe_openvino_gpu()
 
 
 def _resolve_engine(requested: RequestedDevice) -> EngineDebugInfo:
@@ -131,9 +141,12 @@ def transcribe_audio(
     prompt: Optional[str] = None,
     temperature: float = 0.0,
     include_debug: bool = False,
+    require_gpu: bool = False,
 ) -> TranscriptionResult:
     requested = _resolve_device()
     engine = _resolve_engine(requested)
+    if require_gpu and engine.resolved != "intel_gpu":
+        raise GpuNotAvailableError(engine.reason)
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
         tmp_file.write(audio_bytes)
