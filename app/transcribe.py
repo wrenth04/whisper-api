@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import tempfile
 from dataclasses import asdict, dataclass
 from typing import List, Literal, Optional
@@ -106,9 +107,9 @@ def _resolve_engine(requested: RequestedDevice) -> EngineDebugInfo:
     )
 
 
-def _model_runtime_args(engine: EngineDebugInfo) -> tuple[str, str]:
+def _model_runtime_args(engine: EngineDebugInfo, compute_type: Optional[str] = None) -> tuple[str, str]:
     if engine.resolved == "intel_gpu":
-        return "auto", "int8_float16"
+        return "auto", compute_type or "int8_float16"
     return "cpu", "int8"
 
 
@@ -116,8 +117,8 @@ def _model_cache_key(model_name: str, device: str, compute_type: str) -> str:
     return f"{model_name}|{device}|{compute_type}"
 
 
-def _get_model(model_name: str, engine: EngineDebugInfo) -> WhisperModel:
-    device, compute_type = _model_runtime_args(engine)
+def _get_model(model_name: str, engine: EngineDebugInfo, compute_type: Optional[str] = None) -> WhisperModel:
+    device, compute_type = _model_runtime_args(engine, compute_type=compute_type)
     cache_key = _model_cache_key(model_name, device, compute_type)
     if cache_key not in _MODEL_CACHE:
         _MODEL_CACHE[cache_key] = WhisperModel(
@@ -126,6 +127,19 @@ def _get_model(model_name: str, engine: EngineDebugInfo) -> WhisperModel:
             compute_type=compute_type,
         )
     return _MODEL_CACHE[cache_key]
+
+
+def _is_unsupported_gpu_compute_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "int8_float16" in message and "do not support efficient" in message
+
+
+def _gpu_compute_type_candidates() -> List[str]:
+    # On Windows Intel GPU with OpenVINO, int8 is often more broadly supported
+    # than int8_float16. Keep int8_float16 first on non-Windows for performance.
+    if platform.system() == "Windows":
+        return ["int8", "int8_float16"]
+    return ["int8_float16", "int8"]
 
 
 def _fallback_to_cpu(engine: EngineDebugInfo, reason: str) -> EngineDebugInfo:
@@ -156,7 +170,25 @@ def transcribe_audio(
         temp_path = tmp_file.name
 
     try:
-        model = _get_model(model_name, engine)
+        if engine.resolved == "intel_gpu":
+            model = None
+            init_errors: List[str] = []
+            for gpu_compute_type in _gpu_compute_type_candidates():
+                try:
+                    model = _get_model(model_name, engine, compute_type=gpu_compute_type)
+                    break
+                except ValueError as exc:
+                    init_errors.append(f"{gpu_compute_type}:{exc.__class__.__name__}:{exc}")
+                    if not _is_unsupported_gpu_compute_error(exc):
+                        raise
+            if model is None:
+                reason = f"{engine.reason};model_init_failed:{' | '.join(init_errors)}"
+                if require_gpu:
+                    raise GpuNotAvailableError(reason)
+                engine = _fallback_to_cpu(engine, reason)
+                model = _get_model(model_name, engine)
+        else:
+            model = _get_model(model_name, engine)
         try:
             segments, info = model.transcribe(
                 temp_path,
@@ -167,6 +199,10 @@ def transcribe_audio(
         except Exception as exc:
             if engine.resolved != "intel_gpu":
                 raise
+            if require_gpu:
+                raise GpuNotAvailableError(
+                    f"{engine.reason};transcribe_failed:{exc.__class__.__name__}:{exc}"
+                ) from exc
             engine = _fallback_to_cpu(engine, f"transcribe_failed:{exc.__class__.__name__}")
             model = _get_model(model_name, engine)
             segments, info = model.transcribe(
