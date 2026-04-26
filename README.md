@@ -46,6 +46,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 Linux amd64 版本可使用 workflow：`.github/workflows/build-linux-amd64.yml`（手動觸發或推送 `v*` tag）。artifact 會包含可執行檔與 `whisper-api-server-linux-amd64.tar.gz`。
 
+macOS ARM64 版本可使用 workflow：`.github/workflows/build-macos-arm64.yml`（手動觸發或推送 `v*` tag）。artifact 會包含可執行檔與 `whisper-api-server-macos-arm64.tar.gz`。
+
 1. 到 GitHub Actions 手動觸發 **Build Windows EXE**（`workflow_dispatch`）。
 2. 下載 artifact `whisper-api-server-windows-exe`。
 3. 在 Windows 執行：
@@ -76,7 +78,8 @@ python -c "from openvino import Core; print(Core().available_devices)"
 `app/transcribe.py` 會讀取 `WHISPER_DEVICE`：
 
 - `auto`（預設）：偵測 OpenVINO + GPU，若不可用自動退回 CPU。
-- `intel_gpu`：強制嘗試 Intel GPU 路徑；失敗時退回 CPU（穩定優先）。
+- `intel_gpu`：在 Linux/Windows 上強制嘗試 Intel GPU 路徑；失敗時退回 CPU（穩定優先）。
+- `apple_gpu`：在 macOS ARM64 上強制嘗試 Apple 整合 GPU（MLX）；失敗時退回 CPU。
 - `cpu`：直接走 CPU。
 
 另外，模型建立時會**顯式**傳入 `device` 與 `compute_type`，不依賴預設值。
@@ -87,9 +90,9 @@ python -c "from openvino import Core; print(Core().available_devices)"
 |---|---|---|
 | Python | 3.10–3.12 (64-bit) | 建議使用 64-bit 環境 |
 | faster-whisper | `>=1.1.0,<2.0.0` | Whisper 推理 |
-| openvino | `>=2024.3.0,<2026.0.0` | OpenVINO Runtime 偵測與 Intel GPU 可見性判斷 |
+| openvino | `>=2024.3.0,<2026.0.0`（非 macOS ARM64） | OpenVINO Runtime 偵測與 Intel GPU 可見性判斷（Linux/Windows） |
 | Intel GPU Driver | 最新穩定版 | 需可被 OpenVINO `Core().available_devices` 探測到 `GPU` |
-| OS/平台 | Linux / Windows x86_64 | 非 x86_64 或缺驅動時通常會退回 CPU |
+| OS/平台 | Linux / Windows x86_64、macOS ARM64 | 非支援平台或缺驅動時通常會退回 CPU |
 
 > 若 OpenVINO 可 import 但看不到 `GPU`，服務會回報原因並改用 CPU。
 
