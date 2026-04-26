@@ -71,6 +71,7 @@ async def create_transcription(
     prompt: Optional[str] = Form(None),
     response_format: Literal["json", "verbose_json"] = Form("json"),
     temperature: float = Form(0.0),
+    include_debug: bool = Form(False),
 ):
     if not file.filename:
         raise ApiError("No audio file was provided.", code="missing_file")
@@ -88,10 +89,11 @@ async def create_transcription(
         language=language,
         prompt=prompt,
         temperature=temperature,
+        include_debug=include_debug,
     )
 
     if response_format == "json":
-        return JsonTranscriptionResponse(text=result.text)
+        return JsonTranscriptionResponse(text=result.text, debug=result.debug)
 
     return VerboseJsonTranscriptionResponse(
         language=result.language,
@@ -100,4 +102,5 @@ async def create_transcription(
         segments=[
             Segment(id=s.id, start=s.start, end=s.end, text=s.text) for s in result.segments
         ],
+        debug=result.debug,
     )

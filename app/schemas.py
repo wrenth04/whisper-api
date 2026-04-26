@@ -13,8 +13,16 @@ class ErrorResponse(BaseModel):
     error: ErrorBody
 
 
+class TranscriptionDebug(BaseModel):
+    requested: str
+    resolved: str
+    backend: str
+    reason: str
+
+
 class JsonTranscriptionResponse(BaseModel):
     text: str
+    debug: Optional[TranscriptionDebug] = None
 
 
 class Segment(BaseModel):
@@ -30,3 +38,4 @@ class VerboseJsonTranscriptionResponse(BaseModel):
     duration: Optional[float] = None
     text: str
     segments: List[Segment] = Field(default_factory=list)
+    debug: Optional[TranscriptionDebug] = None
