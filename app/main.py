@@ -2,19 +2,32 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 from typing import Literal, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
-from app.schemas import (
-    ErrorBody,
-    ErrorResponse,
-    JsonTranscriptionResponse,
-    Segment,
-    VerboseJsonTranscriptionResponse,
-)
-from app.transcribe import GpuNotAvailableError, check_gpu_support, transcribe_audio
+if __package__ in {None, ""}:
+    sys.path.append(os.path.dirname(__file__))
+    from schemas import (
+        ErrorBody,
+        ErrorResponse,
+        JsonTranscriptionResponse,
+        Segment,
+        VerboseJsonTranscriptionResponse,
+    )
+    from transcribe import GpuNotAvailableError, check_gpu_support, transcribe_audio
+else:
+    from .schemas import (
+        ErrorBody,
+        ErrorResponse,
+        JsonTranscriptionResponse,
+        Segment,
+        VerboseJsonTranscriptionResponse,
+    )
+    from .transcribe import GpuNotAvailableError, check_gpu_support, transcribe_audio
 
 app = FastAPI(title="Whisper OpenAI-Compatible API")
 
@@ -132,7 +145,7 @@ def main() -> int:
 
     import uvicorn
 
-    uvicorn.run("app.main:app", host=args.host, port=args.port)
+    uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
 
