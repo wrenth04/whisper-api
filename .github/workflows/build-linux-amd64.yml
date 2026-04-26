@@ -3,6 +3,9 @@ name: Build Linux AMD64 Binary
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
+      - work
     tags:
       - 'v*'
 
