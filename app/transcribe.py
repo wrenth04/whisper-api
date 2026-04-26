@@ -1,147 +1,80 @@
-"""Whisper transcription service with Intel GPU -> CPU fallback strategy.
-
-Environment variables
----------------------
-WHISPER_DEVICE: auto | intel_gpu | cpu
-WHISPER_MODEL_SIZE: tiny | base | small | medium | large-v3 (and variants)
-"""
-
 from __future__ import annotations
 
-import importlib
-import importlib.util
-import logging
 import os
+import tempfile
 from dataclasses import dataclass
-from typing import Any
+from typing import List, Optional
 
-LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class WhisperSettings:
-    """Runtime settings loaded from environment variables."""
-
-    device_preference: str = "auto"
-    model_size: str = "base"
-
-    @classmethod
-    def from_env(cls) -> "WhisperSettings":
-        raw_device = os.getenv("WHISPER_DEVICE", "auto").strip().lower()
-        model_size = os.getenv("WHISPER_MODEL_SIZE", "base").strip().lower()
-
-        if raw_device not in {"auto", "intel_gpu", "cpu"}:
-            raise ValueError(
-                "WHISPER_DEVICE must be one of: auto, intel_gpu, cpu "
-                f"(got: {raw_device!r})"
-            )
-
-        return cls(device_preference=raw_device, model_size=model_size)
+from faster_whisper import WhisperModel
 
 
-@dataclass(frozen=True)
-class DeviceSelection:
-    """Resolved device/backend after startup probing."""
-
-    requested: str
-    resolved_device: str
-    backend: str
-    reason: str
+@dataclass
+class SegmentResult:
+    id: int
+    start: float
+    end: float
+    text: str
 
 
-class WhisperEngine:
-    """Whisper inference wrapper with Intel GPU (OpenVINO) preferred."""
-
-    def __init__(self, settings: WhisperSettings | None = None) -> None:
-        self.settings = settings or WhisperSettings.from_env()
-        self.selection = self._select_device()
-        LOGGER.info(
-            "Whisper startup: requested=%s, resolved=%s, backend=%s, model=%s, reason=%s",
-            self.selection.requested,
-            self.selection.resolved_device,
-            self.selection.backend,
-            self.settings.model_size,
-            self.selection.reason,
-        )
-
-    def _select_device(self) -> DeviceSelection:
-        pref = self.settings.device_preference
-
-        if pref == "cpu":
-            return DeviceSelection(
-                requested=pref,
-                resolved_device="cpu",
-                backend="whisper",
-                reason="WHISPER_DEVICE=cpu",
-            )
-
-        intel_gpu_ok, reason = _intel_gpu_available_for_openvino()
-        if intel_gpu_ok and pref in {"auto", "intel_gpu"}:
-            return DeviceSelection(
-                requested=pref,
-                resolved_device="intel_gpu",
-                backend="openvino",
-                reason=reason,
-            )
-
-        return DeviceSelection(
-            requested=pref,
-            resolved_device="cpu",
-            backend="whisper",
-            reason=f"fallback_to_cpu: {reason}",
-        )
-
-    def transcribe(
-        self,
-        audio_path: str,
-        language: str | None = None,
-        include_debug: bool = False,
-    ) -> dict[str, Any]:
-        """Transcribe audio and optionally return runtime debug fields.
-
-        Note: this function intentionally focuses on runtime device strategy.
-        Wire this to your actual model invocation in your API layer.
-        """
-        # Placeholder transcription for integration points.
-        text = f"[demo] transcribed {audio_path} with {self.selection.backend}"
-        response: dict[str, Any] = {
-            "text": text,
-            "model_size": self.settings.model_size,
-        }
-
-        if language:
-            response["language"] = language
-
-        if include_debug:
-            response["debug"] = {
-                "device": self.selection.resolved_device,
-                "backend": self.selection.backend,
-                "requested_device": self.selection.requested,
-                "reason": self.selection.reason,
-            }
-
-        return response
+@dataclass
+class TranscriptionResult:
+    text: str
+    language: Optional[str]
+    duration: Optional[float]
+    segments: List[SegmentResult]
 
 
-def _intel_gpu_available_for_openvino() -> tuple[bool, str]:
-    """Return True when OpenVINO Runtime can see Intel GPU device."""
-    if importlib.util.find_spec("openvino.runtime") is None:
-        return False, "openvino.runtime_not_installed"
+_MODEL_CACHE: dict[str, WhisperModel] = {}
 
-    ov_runtime = importlib.import_module("openvino.runtime")
+
+def _get_model(model_name: str) -> WhisperModel:
+    if model_name not in _MODEL_CACHE:
+        _MODEL_CACHE[model_name] = WhisperModel(model_name)
+    return _MODEL_CACHE[model_name]
+
+
+def transcribe_audio(
+    audio_bytes: bytes,
+    model_name: str,
+    language: Optional[str] = None,
+    prompt: Optional[str] = None,
+    temperature: float = 0.0,
+) -> TranscriptionResult:
+    model = _get_model(model_name)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+        tmp_file.write(audio_bytes)
+        temp_path = tmp_file.name
 
     try:
-        core = ov_runtime.Core()
-        devices = {d.upper() for d in core.available_devices}
-    except Exception as exc:  # runtime/device probing exception only
-        return False, f"openvino_probe_failed: {exc}"
+        segments, info = model.transcribe(
+            temp_path,
+            language=language,
+            initial_prompt=prompt,
+            temperature=temperature,
+        )
 
-    if "GPU" in devices:
-        return True, "openvino_gpu_available"
+        segment_results: List[SegmentResult] = []
+        texts: List[str] = []
+        for idx, seg in enumerate(segments):
+            cleaned = seg.text.strip()
+            if cleaned:
+                texts.append(cleaned)
+            segment_results.append(
+                SegmentResult(
+                    id=idx,
+                    start=float(seg.start),
+                    end=float(seg.end),
+                    text=cleaned,
+                )
+            )
 
-    return False, f"openvino_devices={sorted(devices)}"
-
-
-def create_engine() -> WhisperEngine:
-    """Factory used by API startup hooks."""
-    return WhisperEngine(WhisperSettings.from_env())
+        return TranscriptionResult(
+            text=" ".join(texts).strip(),
+            language=getattr(info, "language", language),
+            duration=getattr(info, "duration", None),
+            segments=segment_results,
+        )
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
