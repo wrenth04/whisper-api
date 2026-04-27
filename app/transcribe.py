@@ -387,6 +387,14 @@ def _resolve_decoding_options(request_temperature: Optional[float]) -> DecodingO
     )
 
 
+def _temperature_for_single_value_backend(temperature: Union[float, List[float]]) -> float:
+    if isinstance(temperature, list):
+        if not temperature:
+            return _DEFAULT_TEMPERATURE_SCHEDULE[0]
+        return float(temperature[0])
+    return float(temperature)
+
+
 def _extract_chunk_times(chunk: Any) -> tuple[float, float]:
     # Compatibility for different openvino-genai chunk fields across versions.
     direct_start = getattr(chunk, "start", None)
@@ -431,7 +439,8 @@ def _transcribe_with_openvino_model(
     model_path = _download_openvino_model_snapshot(model_name)
     pipe = ov_genai.WhisperPipeline(model_path, "GPU")
     audio_input = decode_audio(temp_path)
-    generate_kwargs: dict[str, Any] = {"temperature": temperature, "return_timestamps": True}
+    backend_temperature = _temperature_for_single_value_backend(temperature)
+    generate_kwargs: dict[str, Any] = {"temperature": backend_temperature, "return_timestamps": True}
     # openvino-genai rejects None for some optional args; use safe defaults.
     if language:
         supported_languages = _load_openvino_supported_languages(model_path)

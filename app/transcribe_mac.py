@@ -270,15 +270,24 @@ def _resolve_decoding_options(request_temperature: Optional[float]) -> DecodingO
     )
 
 
+def _temperature_for_single_value_backend(temperature: Union[float, List[float]]) -> float:
+    if isinstance(temperature, list):
+        if not temperature:
+            return _DEFAULT_TEMPERATURE_SCHEDULE[0]
+        return float(temperature[0])
+    return float(temperature)
+
+
 def _transcribe_with_mlx(
     temp_path: str,
     model_name: str,
     language: Optional[str],
     prompt: Optional[str],
-    temperature: float,
+    temperature: Union[float, List[float]],
 ) -> tuple[str, Optional[str], Optional[float], List[SegmentResult]]:
     import mlx_whisper
 
+    backend_temperature = _temperature_for_single_value_backend(temperature)
     last_exc: Optional[Exception] = None
     result: Any = None
     for idx, candidate in enumerate(_mlx_model_candidates(model_name)):
@@ -289,7 +298,7 @@ def _transcribe_with_mlx(
                 path_or_hf_repo=candidate,
                 language=language,
                 initial_prompt=prompt,
-                temperature=temperature,
+                temperature=backend_temperature,
             )
             break
         except Exception as exc:
