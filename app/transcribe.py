@@ -307,11 +307,13 @@ def _transcribe_with_openvino_model(
     temperature: float,
 ) -> tuple[str, Optional[str], Optional[float], List[SegmentResult]]:
     import openvino_genai as ov_genai
+    from faster_whisper.audio import decode_audio
 
     model_path = _download_openvino_model_snapshot(model_name)
     pipe = ov_genai.WhisperPipeline(model_path, "GPU")
+    audio_input = decode_audio(temp_path)
     result: Any = pipe.generate(
-        temp_path,
+        audio_input,
         language=language,
         prompt=prompt,
         temperature=temperature,
