@@ -86,7 +86,13 @@ python -c "from openvino import Core; print(Core().available_devices)"
 
 ### 模型名稱相容性（Groq/OpenAI client）
 
-此服務會優先嘗試用 `openvino-genai` 直接載入 OpenVINO repo 型號（例如 `OpenVINO/whisper-large-v3-int8-ov`，或帶 `.../revision/main` 的變體）；若該路徑失敗，才會回退到 `faster-whisper` 的別名型號（例如 `large-v3`），以避免 `model.bin` 缺失錯誤。
+此服務會優先嘗試用 `openvino-genai` 載入 OpenVINO repo 型號（例如 `OpenVINO/whisper-large-v3-int8-ov`，或帶 `.../revision/main` 的變體）；實作會先用 `huggingface_hub.snapshot_download(...)` 把模型下載到本機，再交給 `WhisperPipeline`，符合 OpenVINO 模型卡建議流程。若該路徑失敗，才會回退到 `faster-whisper` 的別名型號（例如 `large-v3`），以避免 `model.bin` 缺失錯誤。
+
+> 參考：`OpenVINO/whisper-large-v3-int8-ov` 模型卡的 GenAI 範例是先 `snapshot_download`，再 `WhisperPipeline(model_path, device)`。
+
+可用環境變數：
+- `WHISPER_OPENVINO_CACHE_DIR`：自訂 OpenVINO 模型下載目錄（預設 `~/.cache/whisper-api`）。
+- `HF_TOKEN`（或 `HUGGINGFACE_HUB_TOKEN`）：提高 Hugging Face 下載速率上限，減少 unauthenticated warning。
 
 ## OpenVINO 相容矩陣與環境限制
 

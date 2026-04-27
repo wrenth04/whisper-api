@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import tempfile
+from pathlib import Path
 from dataclasses import asdict, dataclass
 from typing import Any, List, Literal, Optional
 
@@ -190,6 +191,19 @@ def _canonicalize_model_name(model_name: str) -> str:
     return normalized
 
 
+def _parse_hf_repo_and_revision(model_name: str) -> tuple[str, Optional[str]]:
+    normalized = model_name.strip().rstrip("/")
+    if normalized.lower().startswith("https://huggingface.co/"):
+        normalized = normalized[len("https://huggingface.co/") :].strip("/")
+
+    match = re.search(r"/revision/([^/]+)$", normalized, flags=re.IGNORECASE)
+    if match:
+        repo_id = normalized[: match.start()]
+        revision = match.group(1)
+        return repo_id, revision
+    return normalized, None
+
+
 def _normalize_model_name(model_name: str) -> str:
     normalized = _canonicalize_model_name(model_name)
     lowered = normalized.lower()
@@ -241,8 +255,48 @@ def _fallback_to_cpu(engine: EngineDebugInfo, reason: str) -> EngineDebugInfo:
     )
 
 
+def _fallback_to_faster_whisper_gpu(engine: EngineDebugInfo, reason: str) -> EngineDebugInfo:
+    return EngineDebugInfo(
+        requested=engine.requested,
+        resolved="intel_gpu",
+        backend="ctranslate2",
+        reason=f"openvino_model_fallback_to_faster_whisper:{reason}",
+    )
+
+
 def _is_openvino_repo_model(model_name: str) -> bool:
-    return _canonicalize_model_name(model_name).lower().startswith("openvino/")
+    repo_id, _ = _parse_hf_repo_and_revision(model_name)
+    return repo_id.lower().startswith("openvino/")
+
+
+def _download_openvino_model_snapshot(model_name: str) -> str:
+    from huggingface_hub import snapshot_download
+
+    repo_id, revision = _parse_hf_repo_and_revision(model_name)
+    cache_root = Path(os.getenv("WHISPER_OPENVINO_CACHE_DIR", Path.home() / ".cache" / "whisper-api"))
+    model_cache_dir = cache_root / repo_id.replace("/", "--")
+    model_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
+    download_kwargs: dict[str, Any] = {
+        "repo_id": repo_id,
+        "local_dir": str(model_cache_dir),
+        "local_dir_use_symlinks": False,
+    }
+    if revision:
+        download_kwargs["revision"] = revision
+    if token:
+        download_kwargs["token"] = token
+
+    logger.info(
+        "whisper_openvino_snapshot_download repo_id=%s revision=%s local_dir=%s token_set=%s",
+        repo_id,
+        revision or "main",
+        model_cache_dir,
+        bool(token),
+    )
+    snapshot_download(**download_kwargs)
+    return str(model_cache_dir)
 
 
 def _transcribe_with_openvino_model(
@@ -254,7 +308,8 @@ def _transcribe_with_openvino_model(
 ) -> tuple[str, Optional[str], Optional[float], List[SegmentResult]]:
     import openvino_genai as ov_genai
 
-    pipe = ov_genai.WhisperPipeline(model_name, "GPU")
+    model_path = _download_openvino_model_snapshot(model_name)
+    pipe = ov_genai.WhisperPipeline(model_path, "GPU")
     result: Any = pipe.generate(
         temp_path,
         language=language,
@@ -344,6 +399,7 @@ def transcribe_audio(
                     debug=debug_payload if include_debug else None,
                 )
             except Exception as exc:
+                fallback_reason = f"{exc.__class__.__name__}:{exc}"
                 logger.warning(
                     "whisper_openvino_model_failed fallback_to_faster_whisper model=%s err_type=%s err=%s",
                     requested_model_name,
@@ -354,6 +410,7 @@ def transcribe_audio(
                     raise GpuNotAvailableError(
                         f"{engine.reason};openvino_model_failed:{exc.__class__.__name__}:{exc}"
                     ) from exc
+                engine = _fallback_to_faster_whisper_gpu(engine, fallback_reason)
         if engine.resolved == "intel_gpu":
             model = None
             init_errors: List[str] = []
