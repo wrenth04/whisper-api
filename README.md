@@ -80,7 +80,7 @@ python -c "from openvino import Core; print(Core().available_devices)"
 
 - `auto`（預設）：偵測 OpenVINO + GPU，若不可用自動退回 CPU。
 - `intel_gpu`：在 Linux/Windows 上強制嘗試 Intel GPU 路徑；失敗時退回 CPU（穩定優先）。
-- `apple_gpu`：在 macOS ARM64 上強制嘗試 Apple 整合 GPU（MLX）；失敗時退回 CPU。
+- `apple_gpu`：在 macOS ARM64 上先用 `torch.backends.mps.is_available()` 判斷 `mps`；可用時以 `faster-whisper` 的 `device=auto` 嘗試 GPU，失敗時退回 CPU。
 - `cpu`：直接走 CPU。
 
 另外，模型建立時會**顯式**傳入 `device` 與 `compute_type`，不依賴預設值。
