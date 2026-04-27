@@ -149,13 +149,31 @@ def main() -> int:
     parser.add_argument("--check-gpu", action="store_true", help="Only check GPU support and exit.")
     parser.add_argument("--host", default="0.0.0.0", help="Host for uvicorn server.")
     parser.add_argument("--port", type=int, default=8000, help="Port for uvicorn server.")
+    parser.add_argument(
+        "--cpu-usage-ratio",
+        type=float,
+        default=None,
+        help="Set WHISPER_CPU_USAGE_RATIO for CPU thread usage (range: 0.1 ~ 1.0).",
+    )
     args = parser.parse_args()
+
+    if args.cpu_usage_ratio is not None:
+        if args.cpu_usage_ratio < 0.1 or args.cpu_usage_ratio > 1.0:
+            parser.error("--cpu-usage-ratio must be between 0.1 and 1.0")
+        os.environ["WHISPER_CPU_USAGE_RATIO"] = f"{args.cpu_usage_ratio:.4g}"
+
     if not logging.getLogger().handlers:
         logging.basicConfig(
             level=os.getenv("LOG_LEVEL", "INFO").upper(),
             format="%(asctime)s %(levelname)s %(name)s - %(message)s",
         )
-    logger.info("whisper_api_start host=%s port=%s check_gpu=%s", args.host, args.port, args.check_gpu)
+    logger.info(
+        "whisper_api_start host=%s port=%s check_gpu=%s cpu_usage_ratio=%s",
+        args.host,
+        args.port,
+        args.check_gpu,
+        os.getenv("WHISPER_CPU_USAGE_RATIO", "0.8"),
+    )
 
     if args.check_gpu:
         supported, reason = check_gpu_support()

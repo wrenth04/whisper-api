@@ -144,10 +144,11 @@ curl http://127.0.0.1:8000/v1/audio/transcriptions \
 LOG_LEVEL=DEBUG uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-CPU 路徑預設會使用約 80% 邏輯核心（`cpu_threads = floor(os.cpu_count() * 0.8)`），並在 log 輸出 `whisper_cpu_threads_config`。若要覆寫，可設定：
+CPU 路徑預設會使用約 80% 邏輯核心（`cpu_threads = floor(os.cpu_count() * 0.8)`），並在 log 輸出 `whisper_cpu_threads_config`。若要覆寫，可設定環境變數，或在啟動 server 時直接帶參數：
 
 ```bash
-WHISPER_CPU_USAGE_RATIO=0.8 uvicorn app.main:app --host 0.0.0.0 --port 8000
+WHISPER_CPU_USAGE_RATIO=0.5 uvicorn app.main:app --host 0.0.0.0 --port 8000
+python -m app.main --host 0.0.0.0 --port 8000 --cpu-usage-ratio 0.5
 ```
 
 ## GPU 支援確認參數（新增）
