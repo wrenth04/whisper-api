@@ -309,6 +309,14 @@ def _download_openvino_model_snapshot(model_name: str) -> str:
     return str(model_cache_dir)
 
 
+def _resolve_openvino_pipeline_device() -> str:
+    raw = os.getenv("WHISPER_OPENVINO_PIPELINE_DEVICE", "").strip()
+    if raw:
+        return raw
+    # Prefer scheduling across GPU+CPU in OpenVINO AUTO mode.
+    return "AUTO:GPU,CPU"
+
+
 def _coerce_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -437,7 +445,13 @@ def _transcribe_with_openvino_model(
     from faster_whisper.audio import decode_audio
 
     model_path = _download_openvino_model_snapshot(model_name)
-    pipe = ov_genai.WhisperPipeline(model_path, "GPU")
+    pipeline_device = _resolve_openvino_pipeline_device()
+    logger.info(
+        "whisper_openvino_pipeline_init model=%s device=%s",
+        model_name,
+        pipeline_device,
+    )
+    pipe = ov_genai.WhisperPipeline(model_path, pipeline_device)
     audio_input = decode_audio(temp_path)
     backend_temperature = _temperature_for_single_value_backend(temperature)
     generate_kwargs: dict[str, Any] = {"temperature": backend_temperature, "return_timestamps": True}
