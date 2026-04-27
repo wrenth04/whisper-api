@@ -4,9 +4,10 @@ import logging
 import math
 import os
 import platform
+import re
 import tempfile
 from dataclasses import asdict, dataclass
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from faster_whisper import WhisperModel
 
@@ -49,6 +50,13 @@ class GpuNotAvailableError(RuntimeError):
 
 
 _MODEL_CACHE: dict[str, WhisperModel] = {}
+_MODEL_NAME_ALIASES: dict[str, str] = {
+    "openvino/whisper-large-v3-int8-ov": "large-v3",
+    "openvino/whisper-large-v3-fp16-ov": "large-v3",
+    "openvino/whisper-small-int8-ov": "small",
+    "openvino/whisper-base-int8-ov": "base",
+    "openvino/whisper-tiny-int8-ov": "tiny",
+}
 
 
 def _resolve_device() -> RequestedDevice:
@@ -172,6 +180,45 @@ def _get_model(model_name: str, engine: EngineDebugInfo, compute_type: Optional[
     return _MODEL_CACHE[cache_key]
 
 
+def _canonicalize_model_name(model_name: str) -> str:
+    normalized = model_name.strip().rstrip("/")
+    if normalized.lower().startswith("https://huggingface.co/"):
+        normalized = normalized[len("https://huggingface.co/") :].strip("/")
+
+    if "/revision/" in normalized.lower():
+        normalized = re.split(r"/revision/", normalized, maxsplit=1, flags=re.IGNORECASE)[0]
+    return normalized
+
+
+def _normalize_model_name(model_name: str) -> str:
+    normalized = _canonicalize_model_name(model_name)
+    lowered = normalized.lower()
+    alias = _MODEL_NAME_ALIASES.get(lowered)
+    if alias:
+        logger.info("whisper_model_alias requested=%s resolved=%s", model_name, alias)
+        return alias
+
+    openvino_prefix = "openvino/whisper-"
+    if lowered.startswith(openvino_prefix) and lowered.endswith("-ov"):
+        model_hint = lowered[len(openvino_prefix) : -len("-ov")]
+        model_hint = re.sub(r"-(int8|fp16|fp32)$", "", model_hint)
+        for candidate in (
+            "large-v3-turbo",
+            "large-v3",
+            "large-v2",
+            "large-v1",
+            "medium",
+            "small",
+            "base",
+            "tiny",
+        ):
+            if model_hint.startswith(candidate):
+                logger.info("whisper_model_alias requested=%s inferred=%s", model_name, candidate)
+                return candidate
+
+    return normalized
+
+
 def _is_unsupported_gpu_compute_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return "int8_float16" in message and "do not support efficient" in message
@@ -194,6 +241,57 @@ def _fallback_to_cpu(engine: EngineDebugInfo, reason: str) -> EngineDebugInfo:
     )
 
 
+def _is_openvino_repo_model(model_name: str) -> bool:
+    return _canonicalize_model_name(model_name).lower().startswith("openvino/")
+
+
+def _transcribe_with_openvino_model(
+    temp_path: str,
+    model_name: str,
+    language: Optional[str],
+    prompt: Optional[str],
+    temperature: float,
+) -> tuple[str, Optional[str], Optional[float], List[SegmentResult]]:
+    import openvino_genai as ov_genai
+
+    pipe = ov_genai.WhisperPipeline(model_name, "GPU")
+    result: Any = pipe.generate(
+        temp_path,
+        language=language,
+        prompt=prompt,
+        temperature=temperature,
+    )
+
+    text = ""
+    language_out: Optional[str] = language
+    duration: Optional[float] = None
+    segments: List[SegmentResult] = []
+
+    if hasattr(result, "texts") and getattr(result, "texts"):
+        text = str(result.texts[0]).strip()
+    elif hasattr(result, "text"):
+        text = str(result.text).strip()
+    else:
+        text = str(result).strip()
+
+    if hasattr(result, "language"):
+        language_out = getattr(result, "language")
+
+    raw_chunks = getattr(result, "chunks", None) or getattr(result, "segments", None)
+    if raw_chunks:
+        for idx, chunk in enumerate(raw_chunks):
+            start = float(getattr(chunk, "start", 0.0))
+            end = float(getattr(chunk, "end", 0.0))
+            chunk_text = str(getattr(chunk, "text", "")).strip()
+            segments.append(SegmentResult(id=idx, start=start, end=end, text=chunk_text))
+        if segments:
+            duration = max(s.end for s in segments)
+    elif text:
+        segments.append(SegmentResult(id=0, start=0.0, end=0.0, text=text))
+
+    return text, language_out, duration, segments
+
+
 def transcribe_audio(
     audio_bytes: bytes,
     model_name: str,
@@ -205,13 +303,17 @@ def transcribe_audio(
 ) -> TranscriptionResult:
     requested = _resolve_device()
     engine = _resolve_engine(requested)
+    requested_model_name = _canonicalize_model_name(model_name)
+    model_name = _normalize_model_name(model_name)
     logger.info(
-        "whisper_engine_resolved requested=%s resolved=%s backend=%s reason=%s require_gpu=%s",
+        "whisper_engine_resolved requested=%s resolved=%s backend=%s reason=%s require_gpu=%s requested_model=%s model=%s",
         engine.requested,
         engine.resolved,
         engine.backend,
         engine.reason,
         require_gpu,
+        requested_model_name,
+        model_name,
     )
     if require_gpu and engine.resolved != "intel_gpu":
         raise GpuNotAvailableError(engine.reason)
@@ -221,6 +323,37 @@ def transcribe_audio(
         temp_path = tmp_file.name
 
     try:
+        if engine.resolved == "intel_gpu" and _is_openvino_repo_model(requested_model_name):
+            try:
+                logger.info("whisper_openvino_model_try model=%s", requested_model_name)
+                text, language_out, duration, segments = _transcribe_with_openvino_model(
+                    temp_path=temp_path,
+                    model_name=requested_model_name,
+                    language=language,
+                    prompt=prompt,
+                    temperature=temperature,
+                )
+                logger.info("whisper_openvino_model_ok model=%s", requested_model_name)
+                debug_payload = asdict(engine)
+                logger.info("whisper_engine=%s", debug_payload)
+                return TranscriptionResult(
+                    text=text,
+                    language=language_out,
+                    duration=duration,
+                    segments=segments,
+                    debug=debug_payload if include_debug else None,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "whisper_openvino_model_failed fallback_to_faster_whisper model=%s err_type=%s err=%s",
+                    requested_model_name,
+                    exc.__class__.__name__,
+                    exc,
+                )
+                if require_gpu:
+                    raise GpuNotAvailableError(
+                        f"{engine.reason};openvino_model_failed:{exc.__class__.__name__}:{exc}"
+                    ) from exc
         if engine.resolved == "intel_gpu":
             model = None
             init_errors: List[str] = []
@@ -238,7 +371,7 @@ def transcribe_audio(
                         gpu_compute_type,
                     )
                     break
-                except ValueError as exc:
+                except Exception as exc:
                     init_errors.append(f"{gpu_compute_type}:{exc.__class__.__name__}:{exc}")
                     logger.warning(
                         "whisper_gpu_init_failed model=%s compute_type=%s err=%s",
