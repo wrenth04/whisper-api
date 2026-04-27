@@ -9,6 +9,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-windows-exe:
     runs-on: windows-latest
@@ -58,3 +61,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/whisper-api-server.exe
+          overwrite_files: true
+          token: ${{ secrets.GITHUB_TOKEN }}
