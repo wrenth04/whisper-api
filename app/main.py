@@ -122,6 +122,7 @@ async def create_transcription(
             temperature=temperature,
             include_debug=include_debug,
             require_gpu=require_gpu,
+            source_filename=file.filename,
         )
     except GpuNotAvailableError as exc:
         raise ApiError(
