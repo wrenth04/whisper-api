@@ -180,6 +180,13 @@ WHISPER_CPU_USAGE_RATIO=0.5 uvicorn app.main:app --host 0.0.0.0 --port 8000
 python -m app.main --host 0.0.0.0 --port 8000 --cpu-usage-ratio 0.5
 ```
 
+若要設定預設轉錄 `temperature`（當 API request 未帶 `temperature` 時生效），可用環境變數或啟動參數：
+
+```bash
+WHISPER_TEMPERATURE=0.2 uvicorn app.main:app --host 0.0.0.0 --port 8000
+python -m app.main --host 0.0.0.0 --port 8000 --temperature 0.2
+```
+
 ## GPU 支援確認參數（新增）
 
 API 新增 `require_gpu`（`true/false`，預設 `false`）：
