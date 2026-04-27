@@ -97,6 +97,25 @@ def _cpu_threads_target() -> int:
     return threads
 
 
+def _openvino_cpu_threads_target() -> int:
+    cpu_count = os.cpu_count() or 1
+    raw_ratio = os.getenv("WHISPER_OPENVINO_CPU_USAGE_RATIO", "1.0").strip()
+    try:
+        ratio = float(raw_ratio)
+    except ValueError:
+        logger.warning("Invalid WHISPER_OPENVINO_CPU_USAGE_RATIO=%s, fallback to 1.0", raw_ratio)
+        ratio = 1.0
+    ratio = min(max(ratio, 0.1), 1.0)
+    threads = max(1, math.floor(cpu_count * ratio))
+    logger.info(
+        "whisper_openvino_cpu_threads_config cpu_count=%s ratio=%.2f threads=%s",
+        cpu_count,
+        ratio,
+        threads,
+    )
+    return threads
+
+
 def _probe_openvino_gpu() -> tuple[bool, str]:
     try:
         from openvino import Core
@@ -317,6 +336,24 @@ def _resolve_openvino_pipeline_device() -> str:
     return "AUTO:GPU,CPU"
 
 
+def _apply_openvino_thread_hints(pipeline_device: str) -> None:
+    if "CPU" not in pipeline_device.upper():
+        return
+
+    threads = _openvino_cpu_threads_target()
+    if not os.getenv("OMP_NUM_THREADS"):
+        os.environ["OMP_NUM_THREADS"] = str(threads)
+    if not os.getenv("OPENVINO_INFERENCE_NUM_THREADS"):
+        os.environ["OPENVINO_INFERENCE_NUM_THREADS"] = str(threads)
+
+    logger.info(
+        "whisper_openvino_thread_hints device=%s omp_num_threads=%s openvino_inference_num_threads=%s",
+        pipeline_device,
+        os.getenv("OMP_NUM_THREADS"),
+        os.getenv("OPENVINO_INFERENCE_NUM_THREADS"),
+    )
+
+
 def _coerce_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -451,6 +488,7 @@ def _transcribe_with_openvino_model(
         model_name,
         pipeline_device,
     )
+    _apply_openvino_thread_hints(pipeline_device)
     pipe = ov_genai.WhisperPipeline(model_path, pipeline_device)
     audio_input = decode_audio(temp_path)
     backend_temperature = _temperature_for_single_value_backend(temperature)
