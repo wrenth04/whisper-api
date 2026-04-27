@@ -9,7 +9,7 @@ import tempfile
 import json
 from pathlib import Path
 from dataclasses import asdict, dataclass
-from typing import Any, List, Literal, Optional
+from typing import Any, List, Literal, Optional, Union
 
 from faster_whisper import WhisperModel
 
@@ -45,6 +45,14 @@ class TranscriptionResult:
     debug: Optional[dict[str, str]] = None
 
 
+@dataclass
+class DecodingOptions:
+    temperature: Union[float, List[float]]
+    vad_filter: bool
+    compression_ratio_threshold: float
+    no_speech_threshold: float
+
+
 class GpuNotAvailableError(RuntimeError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
@@ -52,6 +60,7 @@ class GpuNotAvailableError(RuntimeError):
 
 
 _MODEL_CACHE: dict[str, WhisperModel] = {}
+_DEFAULT_TEMPERATURE_SCHEDULE: List[float] = [0.0, 0.2, 0.4, 0.6]
 _MODEL_NAME_ALIASES: dict[str, str] = {
     "openvino/whisper-large-v3-int8-ov": "large-v3",
     "openvino/whisper-large-v3-fp16-ov": "large-v3",
@@ -300,11 +309,116 @@ def _download_openvino_model_snapshot(model_name: str) -> str:
     return str(model_cache_dir)
 
 
+def _resolve_openvino_pipeline_device() -> str:
+    raw = os.getenv("WHISPER_OPENVINO_PIPELINE_DEVICE", "").strip()
+    if raw:
+        return raw
+    # Prefer scheduling across GPU+CPU in OpenVINO AUTO mode.
+    return "AUTO:GPU,CPU"
+
+
+def _apply_openvino_thread_hints(pipeline_device: str) -> None:
+    if "CPU" not in pipeline_device.upper():
+        return
+
+    threads = _cpu_threads_target()
+    if not os.getenv("OMP_NUM_THREADS"):
+        os.environ["OMP_NUM_THREADS"] = str(threads)
+    if not os.getenv("OPENVINO_INFERENCE_NUM_THREADS"):
+        os.environ["OPENVINO_INFERENCE_NUM_THREADS"] = str(threads)
+
+    logger.info(
+        "whisper_openvino_thread_hints device=%s omp_num_threads=%s openvino_inference_num_threads=%s",
+        pipeline_device,
+        os.getenv("OMP_NUM_THREADS"),
+        os.getenv("OPENVINO_INFERENCE_NUM_THREADS"),
+    )
+
+
 def _coerce_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_bool_env(var_name: str, default: bool) -> bool:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    logger.warning("Invalid %s=%s, fallback to %s", var_name, raw, default)
+    return default
+
+
+def _parse_float_env(var_name: str, default: float) -> float:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%s, fallback to %s", var_name, raw, default)
+        return default
+
+
+def _default_temperature_schedule() -> Union[float, List[float]]:
+    raw = os.getenv("WHISPER_TEMPERATURE_SCHEDULE", "").strip()
+    if not raw:
+        # Keep an explicit in-code fallback even when env var is not configured.
+        return list(_DEFAULT_TEMPERATURE_SCHEDULE)
+    values: List[float] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = float(token)
+        except ValueError:
+            logger.warning(
+                "Invalid WHISPER_TEMPERATURE_SCHEDULE token=%s, fallback to default schedule=%s",
+                token,
+                _DEFAULT_TEMPERATURE_SCHEDULE,
+            )
+            return list(_DEFAULT_TEMPERATURE_SCHEDULE)
+        if value < 0.0 or value > 1.0:
+            logger.warning(
+                "Out-of-range WHISPER_TEMPERATURE_SCHEDULE token=%s, fallback to default schedule=%s",
+                token,
+                _DEFAULT_TEMPERATURE_SCHEDULE,
+            )
+            return list(_DEFAULT_TEMPERATURE_SCHEDULE)
+        values.append(value)
+    if not values:
+        return list(_DEFAULT_TEMPERATURE_SCHEDULE)
+    return values
+
+
+def _resolve_decoding_options(request_temperature: Optional[float]) -> DecodingOptions:
+    temperature: Union[float, List[float]]
+    if request_temperature is None:
+        temperature = _default_temperature_schedule()
+    else:
+        temperature = request_temperature
+
+    return DecodingOptions(
+        temperature=temperature,
+        vad_filter=_parse_bool_env("WHISPER_VAD_FILTER", True),
+        compression_ratio_threshold=_parse_float_env("WHISPER_COMPRESSION_RATIO_THRESHOLD", 2.2),
+        no_speech_threshold=_parse_float_env("WHISPER_NO_SPEECH_THRESHOLD", 0.6),
+    )
+
+
+def _temperature_for_single_value_backend(temperature: Union[float, List[float]]) -> float:
+    if isinstance(temperature, list):
+        if not temperature:
+            return _DEFAULT_TEMPERATURE_SCHEDULE[0]
+        return float(temperature[0])
+    return float(temperature)
 
 
 def _extract_chunk_times(chunk: Any) -> tuple[float, float]:
@@ -343,15 +457,23 @@ def _transcribe_with_openvino_model(
     model_name: str,
     language: Optional[str],
     prompt: Optional[str],
-    temperature: float,
+    temperature: Union[float, List[float]],
 ) -> tuple[str, Optional[str], Optional[float], List[SegmentResult]]:
     import openvino_genai as ov_genai
     from faster_whisper.audio import decode_audio
 
     model_path = _download_openvino_model_snapshot(model_name)
-    pipe = ov_genai.WhisperPipeline(model_path, "GPU")
+    pipeline_device = _resolve_openvino_pipeline_device()
+    logger.info(
+        "whisper_openvino_pipeline_init model=%s device=%s",
+        model_name,
+        pipeline_device,
+    )
+    _apply_openvino_thread_hints(pipeline_device)
+    pipe = ov_genai.WhisperPipeline(model_path, pipeline_device)
     audio_input = decode_audio(temp_path)
-    generate_kwargs: dict[str, Any] = {"temperature": temperature, "return_timestamps": True}
+    backend_temperature = _temperature_for_single_value_backend(temperature)
+    generate_kwargs: dict[str, Any] = {"temperature": backend_temperature, "return_timestamps": True}
     # openvino-genai rejects None for some optional args; use safe defaults.
     if language:
         supported_languages = _load_openvino_supported_languages(model_path)
@@ -474,13 +596,14 @@ def transcribe_audio(
     model_name: str,
     language: Optional[str] = None,
     prompt: Optional[str] = None,
-    temperature: float = 0.0,
+    temperature: Optional[float] = None,
     include_debug: bool = False,
     require_gpu: bool = False,
     source_filename: Optional[str] = None,
 ) -> TranscriptionResult:
     requested = _resolve_device()
     engine = _resolve_engine(requested)
+    decoding_options = _resolve_decoding_options(temperature)
     requested_model_name = _canonicalize_model_name(model_name)
     model_name = _normalize_model_name(model_name)
     logger.info(
@@ -510,7 +633,7 @@ def transcribe_audio(
                     model_name=requested_model_name,
                     language=language,
                     prompt=prompt,
-                    temperature=temperature,
+                    temperature=decoding_options.temperature,
                 )
                 logger.info("whisper_openvino_model_ok model=%s", requested_model_name)
                 debug_payload = asdict(engine)
@@ -576,7 +699,10 @@ def transcribe_audio(
                 temp_path,
                 language=language,
                 initial_prompt=prompt,
-                temperature=temperature,
+                temperature=decoding_options.temperature,
+                vad_filter=decoding_options.vad_filter,
+                compression_ratio_threshold=decoding_options.compression_ratio_threshold,
+                no_speech_threshold=decoding_options.no_speech_threshold,
             )
         except Exception as exc:
             if engine.resolved != "intel_gpu":
@@ -596,7 +722,10 @@ def transcribe_audio(
                 temp_path,
                 language=language,
                 initial_prompt=prompt,
-                temperature=temperature,
+                temperature=decoding_options.temperature,
+                vad_filter=decoding_options.vad_filter,
+                compression_ratio_threshold=decoding_options.compression_ratio_threshold,
+                no_speech_threshold=decoding_options.no_speech_threshold,
             )
 
         segment_results: List[SegmentResult] = []

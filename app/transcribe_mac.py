@@ -7,7 +7,7 @@ import platform
 import tempfile
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, List, Literal, Optional
+from typing import Any, List, Literal, Optional, Union
 
 from faster_whisper import WhisperModel
 
@@ -42,6 +42,14 @@ class TranscriptionResult:
     debug: Optional[dict[str, str]] = None
 
 
+@dataclass
+class DecodingOptions:
+    temperature: Union[float, List[float]]
+    vad_filter: bool
+    compression_ratio_threshold: float
+    no_speech_threshold: float
+
+
 class GpuNotAvailableError(RuntimeError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
@@ -49,6 +57,7 @@ class GpuNotAvailableError(RuntimeError):
 
 
 _MODEL_CACHE: dict[str, WhisperModel] = {}
+_DEFAULT_TEMPERATURE_SCHEDULE: List[float] = [0.0, 0.2, 0.4, 0.6]
 _MLX_MODEL_NAME_ALIASES: dict[str, str] = {
     "tiny": "mlx-community/whisper-tiny-mlx",
     "tiny.en": "mlx-community/whisper-tiny.en-mlx",
@@ -191,15 +200,94 @@ def _is_hf_repo_access_error(exc: Exception) -> bool:
     )
 
 
+def _parse_bool_env(var_name: str, default: bool) -> bool:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    logger.warning("Invalid %s=%s, fallback to %s", var_name, raw, default)
+    return default
+
+
+def _parse_float_env(var_name: str, default: float) -> float:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%s, fallback to %s", var_name, raw, default)
+        return default
+
+
+def _default_temperature_schedule() -> Union[float, List[float]]:
+    raw = os.getenv("WHISPER_TEMPERATURE_SCHEDULE", "").strip()
+    if not raw:
+        # Keep an explicit in-code fallback even when env var is not configured.
+        return list(_DEFAULT_TEMPERATURE_SCHEDULE)
+    values: List[float] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            value = float(token)
+        except ValueError:
+            logger.warning(
+                "Invalid WHISPER_TEMPERATURE_SCHEDULE token=%s, fallback to default schedule=%s",
+                token,
+                _DEFAULT_TEMPERATURE_SCHEDULE,
+            )
+            return list(_DEFAULT_TEMPERATURE_SCHEDULE)
+        if value < 0.0 or value > 1.0:
+            logger.warning(
+                "Out-of-range WHISPER_TEMPERATURE_SCHEDULE token=%s, fallback to default schedule=%s",
+                token,
+                _DEFAULT_TEMPERATURE_SCHEDULE,
+            )
+            return list(_DEFAULT_TEMPERATURE_SCHEDULE)
+        values.append(value)
+    if not values:
+        return list(_DEFAULT_TEMPERATURE_SCHEDULE)
+    return values
+
+
+def _resolve_decoding_options(request_temperature: Optional[float]) -> DecodingOptions:
+    temperature: Union[float, List[float]]
+    if request_temperature is None:
+        temperature = _default_temperature_schedule()
+    else:
+        temperature = request_temperature
+    return DecodingOptions(
+        temperature=temperature,
+        vad_filter=_parse_bool_env("WHISPER_VAD_FILTER", True),
+        compression_ratio_threshold=_parse_float_env("WHISPER_COMPRESSION_RATIO_THRESHOLD", 2.2),
+        no_speech_threshold=_parse_float_env("WHISPER_NO_SPEECH_THRESHOLD", 0.6),
+    )
+
+
+def _temperature_for_single_value_backend(temperature: Union[float, List[float]]) -> float:
+    if isinstance(temperature, list):
+        if not temperature:
+            return _DEFAULT_TEMPERATURE_SCHEDULE[0]
+        return float(temperature[0])
+    return float(temperature)
+
+
 def _transcribe_with_mlx(
     temp_path: str,
     model_name: str,
     language: Optional[str],
     prompt: Optional[str],
-    temperature: float,
+    temperature: Union[float, List[float]],
 ) -> tuple[str, Optional[str], Optional[float], List[SegmentResult]]:
     import mlx_whisper
 
+    backend_temperature = _temperature_for_single_value_backend(temperature)
     last_exc: Optional[Exception] = None
     result: Any = None
     for idx, candidate in enumerate(_mlx_model_candidates(model_name)):
@@ -210,7 +298,7 @@ def _transcribe_with_mlx(
                 path_or_hf_repo=candidate,
                 language=language,
                 initial_prompt=prompt,
-                temperature=temperature,
+                temperature=backend_temperature,
             )
             break
         except Exception as exc:
@@ -256,13 +344,14 @@ def transcribe_audio(
     model_name: str,
     language: Optional[str] = None,
     prompt: Optional[str] = None,
-    temperature: float = 0.0,
+    temperature: Optional[float] = None,
     include_debug: bool = False,
     require_gpu: bool = False,
     source_filename: Optional[str] = None,
 ) -> TranscriptionResult:
     requested = _resolve_device()
     engine = _resolve_engine(requested)
+    decoding_options = _resolve_decoding_options(temperature)
     logger.info(
         "whisper_engine_resolved requested=%s resolved=%s backend=%s reason=%s require_gpu=%s",
         engine.requested,
@@ -288,7 +377,7 @@ def transcribe_audio(
                     model_name=model_name,
                     language=language,
                     prompt=prompt,
-                    temperature=temperature,
+                    temperature=decoding_options.temperature,
                 )
                 logger.info("whisper_apple_gpu_transcribe_ok model=%s", model_name)
             except Exception as exc:
@@ -308,7 +397,10 @@ def transcribe_audio(
                     temp_path,
                     language=language,
                     initial_prompt=prompt,
-                    temperature=temperature,
+                    temperature=decoding_options.temperature,
+                    vad_filter=decoding_options.vad_filter,
+                    compression_ratio_threshold=decoding_options.compression_ratio_threshold,
+                    no_speech_threshold=decoding_options.no_speech_threshold,
                 )
                 segments = []
                 texts: List[str] = []
@@ -326,7 +418,10 @@ def transcribe_audio(
                 temp_path,
                 language=language,
                 initial_prompt=prompt,
-                temperature=temperature,
+                temperature=decoding_options.temperature,
+                vad_filter=decoding_options.vad_filter,
+                compression_ratio_threshold=decoding_options.compression_ratio_threshold,
+                no_speech_threshold=decoding_options.no_speech_threshold,
             )
             segments = []
             texts = []
