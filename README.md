@@ -84,6 +84,10 @@ python -c "from openvino import Core; print(Core().available_devices)"
 
 另外，模型建立時會**顯式**傳入 `device` 與 `compute_type`，不依賴預設值。
 
+### 模型名稱相容性（Groq/OpenAI client）
+
+此服務會優先嘗試用 `openvino-genai` 直接載入 OpenVINO repo 型號（例如 `OpenVINO/whisper-large-v3-int8-ov`，或帶 `.../revision/main` 的變體）；若該路徑失敗，才會回退到 `faster-whisper` 的別名型號（例如 `large-v3`），以避免 `model.bin` 缺失錯誤。
+
 ## OpenVINO 相容矩陣與環境限制
 
 | 元件 | 版本建議 | 說明 |

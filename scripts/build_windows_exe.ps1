@@ -10,9 +10,11 @@ pyinstaller `
   --onefile `
   --name whisper-api-server `
   --collect-all openvino `
+  --collect-all openvino_genai `
   --collect-all faster_whisper `
   --hidden-import openvino `
   --hidden-import openvino.runtime `
+  --hidden-import openvino_genai `
   --hidden-import faster_whisper `
   app/main.py
 
