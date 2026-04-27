@@ -11,6 +11,7 @@ from pathlib import Path
 from dataclasses import asdict, dataclass
 from typing import Any, List, Literal, Optional
 
+import numpy as np
 from faster_whisper import WhisperModel
 
 logger = logging.getLogger(__name__)
@@ -338,6 +339,119 @@ def _extract_chunk_times(chunk: Any) -> tuple[float, float]:
     return 0.0, 0.0
 
 
+def _openvino_vad_enabled() -> bool:
+    return os.getenv("WHISPER_OPENVINO_VAD", "true").strip().lower() not in {"0", "false", "off", "no"}
+
+
+def _openvino_vad_detect_segments(audio_input: np.ndarray, sample_rate: int = 16000) -> List[tuple[int, int]]:
+    if audio_input.size == 0:
+        return []
+
+    frame_ms = 30
+    hop_ms = 10
+    min_speech_ms = 250
+    min_silence_ms = 300
+    pad_ms = 200
+
+    frame_len = max(1, int(sample_rate * frame_ms / 1000))
+    hop_len = max(1, int(sample_rate * hop_ms / 1000))
+    min_speech_samples = int(sample_rate * min_speech_ms / 1000)
+    min_silence_samples = int(sample_rate * min_silence_ms / 1000)
+    pad_samples = int(sample_rate * pad_ms / 1000)
+
+    energies: List[float] = []
+    frame_starts: List[int] = []
+    total_len = int(audio_input.shape[0])
+    for start in range(0, total_len, hop_len):
+        end = min(total_len, start + frame_len)
+        frame = audio_input[start:end]
+        if frame.size == 0:
+            continue
+        energies.append(float(np.sqrt(np.mean(np.square(frame)))))
+        frame_starts.append(start)
+
+    if not energies:
+        return []
+
+    energy_arr = np.asarray(energies, dtype=np.float32)
+    low = float(np.percentile(energy_arr, 20))
+    high = float(np.percentile(energy_arr, 95))
+    threshold = max(0.003, low + (high - low) * 0.2)
+
+    speech_ranges: List[tuple[int, int]] = []
+    active_start: Optional[int] = None
+    silence_samples = 0
+    for i, energy in enumerate(energy_arr):
+        frame_start = frame_starts[i]
+        frame_end = min(total_len, frame_start + frame_len)
+        if energy >= threshold:
+            if active_start is None:
+                active_start = frame_start
+            silence_samples = 0
+            continue
+        if active_start is None:
+            continue
+        silence_samples += hop_len
+        if silence_samples >= min_silence_samples:
+            segment_end = max(active_start, frame_end - silence_samples)
+            if segment_end - active_start >= min_speech_samples:
+                speech_ranges.append((active_start, segment_end))
+            active_start = None
+            silence_samples = 0
+
+    if active_start is not None and total_len - active_start >= min_speech_samples:
+        speech_ranges.append((active_start, total_len))
+    if not speech_ranges:
+        return [(0, total_len)]
+
+    padded: List[tuple[int, int]] = []
+    for start, end in speech_ranges:
+        padded_start = max(0, start - pad_samples)
+        padded_end = min(total_len, end + pad_samples)
+        if not padded:
+            padded.append((padded_start, padded_end))
+            continue
+        prev_start, prev_end = padded[-1]
+        if padded_start <= prev_end:
+            padded[-1] = (prev_start, max(prev_end, padded_end))
+        else:
+            padded.append((padded_start, padded_end))
+    return padded
+
+
+def _openvino_generate_with_fallback(
+    pipe: Any,
+    audio_input: np.ndarray,
+    generate_kwargs: dict[str, Any],
+    model_name: str,
+) -> Any:
+    try:
+        return pipe.generate(audio_input, **generate_kwargs)
+    except TypeError as exc:
+        if "return_timestamps" not in generate_kwargs:
+            raise
+        logger.warning(
+            "whisper_openvino_no_return_timestamps_kwarg model=%s err_type=%s err=%s",
+            model_name,
+            exc.__class__.__name__,
+            exc,
+        )
+        generate_kwargs.pop("return_timestamps", None)
+        return pipe.generate(audio_input, **generate_kwargs)
+    except RuntimeError as exc:
+        err_msg = str(exc)
+        if "lang_to_id" not in err_msg or "language" not in err_msg or "language" not in generate_kwargs:
+            raise
+        logger.warning(
+            "whisper_openvino_language_unsupported retry_without_language model=%s language=%s err=%s",
+            model_name,
+            generate_kwargs.get("language"),
+            err_msg,
+        )
+        generate_kwargs.pop("language", None)
+        return pipe.generate(audio_input, **generate_kwargs)
+
+
 def _transcribe_with_openvino_model(
     temp_path: str,
     model_name: str,
@@ -350,7 +464,7 @@ def _transcribe_with_openvino_model(
 
     model_path = _download_openvino_model_snapshot(model_name)
     pipe = ov_genai.WhisperPipeline(model_path, "GPU")
-    audio_input = decode_audio(temp_path)
+    audio_input = np.asarray(decode_audio(temp_path), dtype=np.float32)
     generate_kwargs: dict[str, Any] = {"temperature": temperature, "return_timestamps": True}
     # openvino-genai rejects None for some optional args; use safe defaults.
     if language:
@@ -366,61 +480,65 @@ def _transcribe_with_openvino_model(
                 len(supported_languages),
             )
     generate_kwargs["prompt"] = prompt or ""
-    try:
-        result: Any = pipe.generate(audio_input, **generate_kwargs)
-    except TypeError as exc:
-        # Some openvino-genai versions do not support return_timestamps kwargs.
-        if "return_timestamps" not in generate_kwargs:
-            raise
-        logger.warning(
-            "whisper_openvino_no_return_timestamps_kwarg model=%s err_type=%s err=%s",
-            model_name,
-            exc.__class__.__name__,
-            exc,
-        )
-        generate_kwargs.pop("return_timestamps", None)
-        result = pipe.generate(audio_input, **generate_kwargs)
-    except RuntimeError as exc:
-        err_msg = str(exc)
-        if "lang_to_id" not in err_msg or "language" not in err_msg or "language" not in generate_kwargs:
-            raise
-        logger.warning(
-            "whisper_openvino_language_unsupported retry_without_language model=%s language=%s err=%s",
-            model_name,
-            generate_kwargs.get("language"),
-            err_msg,
-        )
-        generate_kwargs.pop("language", None)
-        result = pipe.generate(audio_input, **generate_kwargs)
-
-    text = ""
     language_out: Optional[str] = language
     duration: Optional[float] = None
     segments: List[SegmentResult] = []
+    text_parts: List[str] = []
 
-    if hasattr(result, "texts") and getattr(result, "texts"):
-        text = str(result.texts[0]).strip()
-    elif hasattr(result, "text"):
-        text = str(result.text).strip()
-    else:
-        text = str(result).strip()
+    vad_ranges = [(0, int(audio_input.shape[0]))]
+    if _openvino_vad_enabled():
+        vad_ranges = _openvino_vad_detect_segments(audio_input)
+        logger.info("whisper_openvino_vad_segments model=%s count=%s", model_name, len(vad_ranges))
 
-    if hasattr(result, "language"):
-        language_out = getattr(result, "language")
+    for range_start, range_end in vad_ranges:
+        chunk_audio = audio_input[range_start:range_end]
+        if chunk_audio.size == 0:
+            continue
+        result = _openvino_generate_with_fallback(pipe, chunk_audio, dict(generate_kwargs), model_name)
 
-    raw_chunks = getattr(result, "chunks", None) or getattr(result, "segments", None)
-    if raw_chunks:
-        for idx, chunk in enumerate(raw_chunks):
-            start, end = _extract_chunk_times(chunk)
-            if isinstance(chunk, dict):
-                chunk_text = str(chunk.get("text", "")).strip()
-            else:
-                chunk_text = str(getattr(chunk, "text", "")).strip()
-            segments.append(SegmentResult(id=idx, start=start, end=end, text=chunk_text))
-        if segments:
-            duration = max(s.end for s in segments)
-    elif text:
-        segments.append(SegmentResult(id=0, start=0.0, end=0.0, text=text))
+        if hasattr(result, "language"):
+            language_out = getattr(result, "language")
+
+        chunk_text_all = ""
+        if hasattr(result, "texts") and getattr(result, "texts"):
+            chunk_text_all = str(result.texts[0]).strip()
+        elif hasattr(result, "text"):
+            chunk_text_all = str(result.text).strip()
+        else:
+            chunk_text_all = str(result).strip()
+        if chunk_text_all:
+            text_parts.append(chunk_text_all)
+
+        time_offset = range_start / 16000.0
+        raw_chunks = getattr(result, "chunks", None) or getattr(result, "segments", None)
+        if raw_chunks:
+            for chunk in raw_chunks:
+                start, end = _extract_chunk_times(chunk)
+                if isinstance(chunk, dict):
+                    chunk_text = str(chunk.get("text", "")).strip()
+                else:
+                    chunk_text = str(getattr(chunk, "text", "")).strip()
+                segments.append(
+                    SegmentResult(
+                        id=len(segments),
+                        start=start + time_offset,
+                        end=end + time_offset,
+                        text=chunk_text,
+                    )
+                )
+        elif chunk_text_all:
+            segments.append(
+                SegmentResult(
+                    id=len(segments),
+                    start=time_offset,
+                    end=(range_end / 16000.0),
+                    text=chunk_text_all,
+                )
+            )
+
+    text = " ".join(part for part in text_parts if part).strip()
+    if segments:
+        duration = max(s.end for s in segments)
 
     return text, language_out, duration, segments
 

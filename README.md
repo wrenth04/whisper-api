@@ -94,6 +94,7 @@ python -c "from openvino import Core; print(Core().available_devices)"
 可用環境變數：
 - `WHISPER_OPENVINO_CACHE_DIR`：自訂 OpenVINO 模型下載目錄（預設 `~/.cache/whisper-api`）。
 - `HF_TOKEN`（或 `HUGGINGFACE_HUB_TOKEN`）：提高 Hugging Face 下載速率上限，減少 unauthenticated warning。
+- `WHISPER_OPENVINO_VAD`：是否啟用 OpenVINO 路徑的內建 VAD 分段（預設 `true`；可設 `false`/`0` 關閉）。
 
 ## OpenVINO 相容矩陣與環境限制
 
