@@ -14,10 +14,10 @@ pip install -r requirements.txt
 
 ### 打包/部署前必要 include 檢查
 
-此專案的必要 runtime 相依已包含在 `requirements.txt`（`faster-whisper`、`openvino`、`python-multipart` 等）。建議在打包前先做一次 import smoke test：
+此專案的必要 runtime 相依已包含在 `requirements.txt`（`faster-whisper`、`openvino`、`openvino_tokenizers`、`python-multipart` 等）。建議在打包前先做一次 import smoke test：
 
 ```bash
-python -c "import fastapi, faster_whisper, openvino; print('imports_ok')"
+python -c "import fastapi, faster_whisper, openvino, openvino_tokenizers; print('imports_ok')"
 ```
 
 ## 執行
@@ -43,6 +43,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 如果你在 Windows 上遇到「Python 可以啟動，但 exe 的 `--check-gpu` 回傳 `openvino_gpu_missing:[]`」，通常是打包時少帶了 OpenVINO/faster-whisper 的 runtime 檔。
 
 建議優先使用 GitHub Actions workflow：`.github/workflows/build-windows-exe.yml`。
+目前 workflow 的 PyInstaller 已包含 `openvino`、`openvino_tokenizers`、`openvino-genai` 相關打包設定，避免執行檔缺少 tokenizer extension entrypoint。
 
 Linux amd64 版本可使用 workflow：`.github/workflows/build-linux-amd64.yml`（手動觸發或推送 `v*` tag）。artifact 會包含可執行檔與 `whisper-api-server-linux-amd64.tar.gz`。
 
@@ -100,11 +101,29 @@ python -c "from openvino import Core; print(Core().available_devices)"
 |---|---|---|
 | Python | 3.10–3.12 (64-bit) | 建議使用 64-bit 環境 |
 | faster-whisper | `>=1.1.0,<2.0.0` | Whisper 推理 |
-| openvino | `>=2024.3.0,<2026.0.0`（非 macOS ARM64） | OpenVINO Runtime 偵測與 Intel GPU 可見性判斷（Linux/Windows） |
+| openvino | `>=2024.3.0,<2027.0.0`（非 macOS ARM64） | OpenVINO Runtime 偵測與 Intel GPU 可見性判斷（Linux/Windows） |
+| openvino_tokenizers | `>=2024.3.0,<2027.0.0`（非 macOS ARM64） | OpenVINO tokenizer extension；缺少或版本不對齊時可能出現 `Cannot add extension` |
+| openvino-genai | `>=2024.3.0,<2027.0.0`（非 macOS ARM64） | OpenVINO WhisperPipeline 推理 |
 | Intel GPU Driver | 最新穩定版 | 需可被 OpenVINO `Core().available_devices` 探測到 `GPU` |
 | OS/平台 | Linux / Windows x86_64、macOS ARM64 | 非支援平台或缺驅動時通常會退回 CPU |
 
 > 若 OpenVINO 可 import 但看不到 `GPU`，服務會回報原因並改用 CPU。
+
+若你在 log 看到類似錯誤：
+
+`Cannot add extension. Cannot find entry point to the extension library`
+
+通常是 `openvino` / `openvino_tokenizers` 版本未對齊，建議重裝（在同一個 venv）：
+
+```bash
+pip install -U openvino openvino_tokenizers
+```
+
+若要嘗試 nightly：
+
+```bash
+pip install --pre -U openvino openvino_tokenizers --extra-index-url https://storage.openvinotoolkit.org/simple/wheels/nightly
+```
 
 ## Debug 可觀測性
 

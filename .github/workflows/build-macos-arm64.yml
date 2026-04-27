@@ -46,6 +46,8 @@ jobs:
             --hidden-import faster_whisper \
             --exclude-module openvino \
             --exclude-module openvino.runtime \
+            --exclude-module openvino_tokenizers \
+            --exclude-module openvino_genai \
             app/main.py
 
       - name: Package artifact
