@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from typing import Literal, Optional
@@ -42,6 +43,7 @@ else:
         from .transcribe import GpuNotAvailableError, check_gpu_support, transcribe_audio
 
 app = FastAPI(title="Whisper OpenAI-Compatible API")
+logger = logging.getLogger(__name__)
 
 
 class ApiError(Exception):
@@ -148,10 +150,17 @@ def main() -> int:
     parser.add_argument("--host", default="0.0.0.0", help="Host for uvicorn server.")
     parser.add_argument("--port", type=int, default=8000, help="Port for uvicorn server.")
     args = parser.parse_args()
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+        )
+    logger.info("whisper_api_start host=%s port=%s check_gpu=%s", args.host, args.port, args.check_gpu)
 
     if args.check_gpu:
         supported, reason = check_gpu_support()
         payload = {"gpu_supported": supported, "reason": reason}
+        logger.info("whisper_api_check_gpu supported=%s reason=%s", supported, reason)
         print(json.dumps(payload, ensure_ascii=False))
         return 0 if supported else 2
 

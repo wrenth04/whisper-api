@@ -131,6 +131,25 @@ curl http://127.0.0.1:8000/v1/audio/transcriptions \
 }
 ```
 
+另外，服務端現在會輸出更詳細的執行 log（預設 `INFO`），方便確認實際是否走 GPU：
+
+- `whisper_engine_resolved`：請求裝置、最終裝置、後端與原因。
+- `whisper_model_init` / `whisper_cpu_model_init`：模型初始化是否命中 cache，及 `device`、`compute_type`。
+- `whisper_gpu_init_try` / `whisper_gpu_init_ok` / `whisper_gpu_init_failed`：GPU 初始化嘗試細節。
+- `whisper_gpu_fallback`、`whisper_gpu_transcribe_failed fallback_to_cpu`：GPU 失敗後退回 CPU 的理由。
+
+可用 `LOG_LEVEL` 調整等級（例如 `DEBUG`）：
+
+```bash
+LOG_LEVEL=DEBUG uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+CPU 路徑預設會使用約 80% 邏輯核心（`cpu_threads = floor(os.cpu_count() * 0.8)`），並在 log 輸出 `whisper_cpu_threads_config`。若要覆寫，可設定：
+
+```bash
+WHISPER_CPU_USAGE_RATIO=0.8 uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
 ## GPU 支援確認參數（新增）
 
 API 新增 `require_gpu`（`true/false`，預設 `false`）：
