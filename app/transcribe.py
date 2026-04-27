@@ -477,6 +477,7 @@ def transcribe_audio(
     temperature: float = 0.0,
     include_debug: bool = False,
     require_gpu: bool = False,
+    source_filename: Optional[str] = None,
 ) -> TranscriptionResult:
     requested = _resolve_device()
     engine = _resolve_engine(requested)
@@ -495,7 +496,8 @@ def transcribe_audio(
     if require_gpu and engine.resolved != "intel_gpu":
         raise GpuNotAvailableError(engine.reason)
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+    temp_suffix = Path(source_filename or "").suffix or ".tmp"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=temp_suffix) as tmp_file:
         tmp_file.write(audio_bytes)
         temp_path = tmp_file.name
 
