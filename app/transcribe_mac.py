@@ -5,9 +5,9 @@ import math
 import os
 import platform
 import tempfile
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, List, Literal, Optional
+from pathlib import Path
+from typing import List, Literal, Optional
 
 from faster_whisper import WhisperModel
 
@@ -49,19 +49,6 @@ class GpuNotAvailableError(RuntimeError):
 
 
 _MODEL_CACHE: dict[str, WhisperModel] = {}
-_MLX_MODEL_NAME_ALIASES: dict[str, str] = {
-    "tiny": "mlx-community/whisper-tiny-mlx",
-    "tiny.en": "mlx-community/whisper-tiny.en-mlx",
-    "base": "mlx-community/whisper-base-mlx",
-    "base.en": "mlx-community/whisper-base.en-mlx",
-    "small": "mlx-community/whisper-small-mlx",
-    "small.en": "mlx-community/whisper-small.en-mlx",
-    "medium": "mlx-community/whisper-medium-mlx",
-    "medium.en": "mlx-community/whisper-medium.en-mlx",
-    "large-v2": "mlx-community/whisper-large-v2-mlx",
-    "large-v3": "mlx-community/whisper-large-v3-mlx",
-    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
-}
 
 
 def _resolve_device() -> RequestedDevice:
@@ -101,154 +88,85 @@ def _is_macos_arm64() -> bool:
     return platform.system() == "Darwin" and platform.machine() in {"arm64", "aarch64"}
 
 
-def _probe_mlx_gpu() -> tuple[bool, str]:
+def _torch_device() -> str:
+    try:
+        import torch
+
+        return "mps" if torch.backends.mps.is_available() else "cpu"
+    except Exception as exc:
+        logger.warning("torch_mps_probe_failed err_type=%s err=%s", exc.__class__.__name__, exc)
+        return "cpu"
+
+
+def _probe_apple_gpu() -> tuple[bool, str]:
     if not _is_macos_arm64():
         return False, "platform_not_macos_arm64"
 
-    try:
-        import mlx.core as mx
-    except Exception as exc:
-        return False, f"mlx_unavailable:{exc.__class__.__name__}"
+    device = _torch_device()
+    if device != "mps":
+        return False, "torch_mps_unavailable"
 
-    try:
-        default_device = str(mx.default_device())
-        if "gpu" in default_device.lower():
-            return True, f"mlx_gpu_available:{default_device}"
-        return False, f"mlx_gpu_not_selected:{default_device}"
-    except Exception as exc:
-        return False, f"mlx_probe_failed:{exc.__class__.__name__}:{exc}"
+    return True, "torch_mps_available"
 
 
 def check_gpu_support() -> tuple[bool, str]:
-    return _probe_mlx_gpu()
+    return _probe_apple_gpu()
 
 
 def _resolve_engine(requested: RequestedDevice) -> EngineDebugInfo:
     if requested == "cpu":
         return EngineDebugInfo(requested=requested, resolved="cpu", backend="ctranslate2", reason="forced_cpu")
 
-    available, reason = _probe_mlx_gpu()
+    available, reason = _probe_apple_gpu()
     if available:
-        return EngineDebugInfo(requested=requested, resolved="apple_gpu", backend="mlx-whisper", reason=reason)
+        return EngineDebugInfo(requested=requested, resolved="apple_gpu", backend="ctranslate2", reason=reason)
 
     return EngineDebugInfo(requested=requested, resolved="cpu", backend="ctranslate2", reason=reason)
 
 
-def _model_cache_key(model_name: str, cpu_threads: int) -> str:
-    return f"{model_name}|cpu|int8|cpu_threads={cpu_threads}"
+def _model_runtime_args(engine: EngineDebugInfo) -> tuple[str, str]:
+    if engine.resolved == "apple_gpu":
+        return "auto", "default"
+    return "cpu", "int8"
 
 
-def _get_cpu_model(model_name: str) -> WhisperModel:
+def _model_cache_key(model_name: str, device: str, compute_type: str, cpu_threads: int) -> str:
+    return f"{model_name}|{device}|{compute_type}|cpu_threads={cpu_threads}"
+
+
+def _get_model(model_name: str, engine: EngineDebugInfo) -> WhisperModel:
+    device, compute_type = _model_runtime_args(engine)
     cpu_threads = _cpu_threads_target()
-    cache_key = _model_cache_key(model_name, cpu_threads)
+    cache_key = _model_cache_key(model_name, device, compute_type, cpu_threads)
     if cache_key not in _MODEL_CACHE:
         logger.info(
-            "whisper_cpu_model_init cache_miss model=%s device=cpu compute_type=int8 cpu_threads=%s",
+            "whisper_model_init cache_miss model=%s requested=%s resolved=%s backend=%s device=%s compute_type=%s cpu_threads=%s",
             model_name,
+            engine.requested,
+            engine.resolved,
+            engine.backend,
+            device,
+            compute_type,
             cpu_threads,
         )
         _MODEL_CACHE[cache_key] = WhisperModel(
             model_name,
-            device="cpu",
-            compute_type="int8",
+            device=device,
+            compute_type=compute_type,
             cpu_threads=cpu_threads,
         )
     else:
         logger.info(
-            "whisper_cpu_model_init cache_hit model=%s device=cpu compute_type=int8 cpu_threads=%s",
+            "whisper_model_init cache_hit model=%s requested=%s resolved=%s backend=%s device=%s compute_type=%s cpu_threads=%s",
             model_name,
+            engine.requested,
+            engine.resolved,
+            engine.backend,
+            device,
+            compute_type,
             cpu_threads,
         )
     return _MODEL_CACHE[cache_key]
-
-
-def _mlx_model_candidates(model_name: str) -> List[str]:
-    normalized = model_name.strip()
-    if "/" in normalized:
-        return [normalized]
-
-    alias = _MLX_MODEL_NAME_ALIASES.get(normalized)
-    if alias and alias != normalized:
-        return [alias, normalized]
-    return [normalized]
-
-
-def _is_hf_repo_access_error(exc: Exception) -> bool:
-    exc_name = exc.__class__.__name__.lower()
-    message = str(exc).lower()
-    hf_error_keywords = {
-        "repositorynotfounderror",
-        "gatedrepoerror",
-        "revisionnotfounderror",
-        "entrynotfounderror",
-        "hfhubhttperror",
-    }
-    return (
-        exc_name in hf_error_keywords
-        or "401" in message
-        or "repository not found" in message
-        or "unauthorized" in message
-    )
-
-
-def _transcribe_with_mlx(
-    temp_path: str,
-    model_name: str,
-    language: Optional[str],
-    prompt: Optional[str],
-    temperature: float,
-) -> tuple[str, Optional[str], Optional[float], List[SegmentResult]]:
-    import mlx_whisper
-
-    last_exc: Optional[Exception] = None
-    result: Any = None
-    for idx, candidate in enumerate(_mlx_model_candidates(model_name)):
-        try:
-            logger.info("whisper_apple_gpu_model_try requested=%s candidate=%s", model_name, candidate)
-            result = mlx_whisper.transcribe(
-                temp_path,
-                path_or_hf_repo=candidate,
-                language=language,
-                initial_prompt=prompt,
-                temperature=temperature,
-            )
-            break
-        except Exception as exc:
-            last_exc = exc
-            if idx == 0 and candidate != model_name and _is_hf_repo_access_error(exc):
-                logger.warning(
-                    "whisper_apple_gpu_model_alias_retry requested=%s candidate=%s err_type=%s err=%s",
-                    model_name,
-                    candidate,
-                    exc.__class__.__name__,
-                    exc,
-                )
-                continue
-            raise
-
-    if result is None and last_exc is not None:
-        raise last_exc
-
-    text = str(result.get("text", "")).strip()
-    language_out = result.get("language")
-
-    segments: List[SegmentResult] = []
-    for idx, seg in enumerate(result.get("segments", []) or []):
-        cleaned = str(seg.get("text", "")).strip()
-        segments.append(
-            SegmentResult(
-                id=idx,
-                start=float(seg.get("start", 0.0)),
-                end=float(seg.get("end", 0.0)),
-                text=cleaned,
-            )
-        )
-
-    duration = None
-    if segments:
-        duration = max(s.end for s in segments)
-
-    return text, language_out, duration, segments
 
 
 def transcribe_audio(
@@ -280,66 +198,55 @@ def transcribe_audio(
         temp_path = tmp_file.name
 
     try:
-        if engine.resolved == "apple_gpu":
-            try:
-                logger.info("whisper_apple_gpu_transcribe_start model=%s", model_name)
-                text, language_out, duration, segments = _transcribe_with_mlx(
-                    temp_path=temp_path,
-                    model_name=model_name,
-                    language=language,
-                    prompt=prompt,
-                    temperature=temperature,
-                )
-                logger.info("whisper_apple_gpu_transcribe_ok model=%s", model_name)
-            except Exception as exc:
-                logger.warning(
-                    "whisper_apple_gpu_transcribe_failed fallback_to_cpu err_type=%s err=%s",
-                    exc.__class__.__name__,
-                    exc,
-                )
-                engine = EngineDebugInfo(
-                    requested=engine.requested,
-                    resolved="cpu",
-                    backend="ctranslate2",
-                    reason=f"apple_gpu_fallback_to_cpu:{exc.__class__.__name__}",
-                )
-                model = _get_cpu_model(model_name)
-                raw_segments, info = model.transcribe(
-                    temp_path,
-                    language=language,
-                    initial_prompt=prompt,
-                    temperature=temperature,
-                )
-                segments = []
-                texts: List[str] = []
-                for idx, seg in enumerate(raw_segments):
-                    cleaned = seg.text.strip()
-                    if cleaned:
-                        texts.append(cleaned)
-                    segments.append(SegmentResult(id=idx, start=float(seg.start), end=float(seg.end), text=cleaned))
-                text = " ".join(texts).strip()
-                language_out = getattr(info, "language", language)
-                duration = getattr(info, "duration", None)
-        else:
-            model = _get_cpu_model(model_name)
+        model = _get_model(model_name, engine)
+        try:
             raw_segments, info = model.transcribe(
                 temp_path,
                 language=language,
                 initial_prompt=prompt,
                 temperature=temperature,
             )
-            segments = []
-            texts = []
-            for idx, seg in enumerate(raw_segments):
-                cleaned = seg.text.strip()
-                if cleaned:
-                    texts.append(cleaned)
-                segments.append(SegmentResult(id=idx, start=float(seg.start), end=float(seg.end), text=cleaned))
-            text = " ".join(texts).strip()
-            language_out = getattr(info, "language", language)
-            duration = getattr(info, "duration", None)
+        except Exception as exc:
+            if engine.resolved != "apple_gpu":
+                raise
+            logger.warning(
+                "whisper_apple_gpu_transcribe_failed fallback_to_cpu err_type=%s err=%s",
+                exc.__class__.__name__,
+                exc,
+            )
+            engine = EngineDebugInfo(
+                requested=engine.requested,
+                resolved="cpu",
+                backend="ctranslate2",
+                reason=f"apple_gpu_fallback_to_cpu:{exc.__class__.__name__}",
+            )
+            model = _get_model(model_name, engine)
+            raw_segments, info = model.transcribe(
+                temp_path,
+                language=language,
+                initial_prompt=prompt,
+                temperature=temperature,
+            )
 
-        logger.info("whisper_engine_final requested=%s resolved=%s backend=%s reason=%s", engine.requested, engine.resolved, engine.backend, engine.reason)
+        segments: List[SegmentResult] = []
+        texts: List[str] = []
+        for idx, seg in enumerate(raw_segments):
+            cleaned = seg.text.strip()
+            if cleaned:
+                texts.append(cleaned)
+            segments.append(SegmentResult(id=idx, start=float(seg.start), end=float(seg.end), text=cleaned))
+
+        text = " ".join(texts).strip()
+        language_out = getattr(info, "language", language)
+        duration = getattr(info, "duration", None)
+
+        logger.info(
+            "whisper_engine_final requested=%s resolved=%s backend=%s reason=%s",
+            engine.requested,
+            engine.resolved,
+            engine.backend,
+            engine.reason,
+        )
         return TranscriptionResult(
             text=text,
             language=language_out,

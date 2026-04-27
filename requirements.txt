@@ -6,4 +6,4 @@ faster-whisper>=1.1.0,<2.0.0
 openvino>=2024.3.0,<2027.0.0; platform_system != 'Darwin' or platform_machine != 'arm64'
 openvino_tokenizers>=2024.3.0,<2027.0.0; platform_system != 'Darwin' or platform_machine != 'arm64'
 openvino-genai>=2024.3.0,<2027.0.0; platform_system != 'Darwin' or platform_machine != 'arm64'
-mlx-whisper>=0.4.2; platform_system == 'Darwin' and platform_machine == 'arm64'
+torch>=2.3.0; platform_system == 'Darwin' and platform_machine == 'arm64'
