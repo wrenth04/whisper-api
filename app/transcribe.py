@@ -60,6 +60,7 @@ class GpuNotAvailableError(RuntimeError):
 
 
 _MODEL_CACHE: dict[str, WhisperModel] = {}
+_DEFAULT_TEMPERATURE_SCHEDULE: List[float] = [0.0, 0.2, 0.4, 0.6]
 _MODEL_NAME_ALIASES: dict[str, str] = {
     "openvino/whisper-large-v3-int8-ov": "large-v3",
     "openvino/whisper-large-v3-fp16-ov": "large-v3",
@@ -342,7 +343,8 @@ def _parse_float_env(var_name: str, default: float) -> float:
 def _default_temperature_schedule() -> Union[float, List[float]]:
     raw = os.getenv("WHISPER_TEMPERATURE_SCHEDULE", "").strip()
     if not raw:
-        return 0.0
+        # Keep an explicit in-code fallback even when env var is not configured.
+        return list(_DEFAULT_TEMPERATURE_SCHEDULE)
     values: List[float] = []
     for token in raw.split(","):
         token = token.strip()
@@ -351,14 +353,22 @@ def _default_temperature_schedule() -> Union[float, List[float]]:
         try:
             value = float(token)
         except ValueError:
-            logger.warning("Invalid WHISPER_TEMPERATURE_SCHEDULE token=%s, fallback to 0.0", token)
-            return 0.0
+            logger.warning(
+                "Invalid WHISPER_TEMPERATURE_SCHEDULE token=%s, fallback to default schedule=%s",
+                token,
+                _DEFAULT_TEMPERATURE_SCHEDULE,
+            )
+            return list(_DEFAULT_TEMPERATURE_SCHEDULE)
         if value < 0.0 or value > 1.0:
-            logger.warning("Out-of-range WHISPER_TEMPERATURE_SCHEDULE token=%s, fallback to 0.0", token)
-            return 0.0
+            logger.warning(
+                "Out-of-range WHISPER_TEMPERATURE_SCHEDULE token=%s, fallback to default schedule=%s",
+                token,
+                _DEFAULT_TEMPERATURE_SCHEDULE,
+            )
+            return list(_DEFAULT_TEMPERATURE_SCHEDULE)
         values.append(value)
     if not values:
-        return 0.0
+        return list(_DEFAULT_TEMPERATURE_SCHEDULE)
     return values
 
 

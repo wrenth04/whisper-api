@@ -199,7 +199,7 @@ WHISPER_TEMPERATURE_SCHEDULE=0.0,0.2,0.4,0.6
 - `WHISPER_VAD_FILTER`：啟用 faster-whisper 的 VAD 前處理（預設 `true`）。
 - `WHISPER_COMPRESSION_RATIO_THRESHOLD`：壓縮率門檻（預設 `2.2`，低於舊預設 `2.4`）。
 - `WHISPER_NO_SPEECH_THRESHOLD`：無聲門檻（預設 `0.6`）。
-- `WHISPER_TEMPERATURE_SCHEDULE`：當 API request 沒帶 `temperature` 時，改用溫度退火序列（例如 `0.0,0.2,0.4,0.6`）。
+- `WHISPER_TEMPERATURE_SCHEDULE`：當 API request 沒帶 `temperature` 時，改用溫度退火序列（例如 `0.0,0.2,0.4,0.6`）。若環境變數未設定，程式內建預設就是 `0.0,0.2,0.4,0.6`。
 
 > 注意：上述 VAD 與 threshold 參數會作用在 faster-whisper 路徑；若走 `openvino-genai` 的 `WhisperPipeline`，目前僅會套用 `temperature`（由 openvino-genai 支援範圍決定）。
 
