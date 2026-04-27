@@ -312,12 +312,12 @@ def _transcribe_with_openvino_model(
     model_path = _download_openvino_model_snapshot(model_name)
     pipe = ov_genai.WhisperPipeline(model_path, "GPU")
     audio_input = decode_audio(temp_path)
-    result: Any = pipe.generate(
-        audio_input,
-        language=language,
-        prompt=prompt,
-        temperature=temperature,
-    )
+    generate_kwargs: dict[str, Any] = {"temperature": temperature}
+    # openvino-genai rejects None for some optional args; use safe defaults.
+    if language:
+        generate_kwargs["language"] = language
+    generate_kwargs["prompt"] = prompt or ""
+    result: Any = pipe.generate(audio_input, **generate_kwargs)
 
     text = ""
     language_out: Optional[str] = language
