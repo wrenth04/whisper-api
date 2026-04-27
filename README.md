@@ -187,6 +187,22 @@ WHISPER_TEMPERATURE=0.2 uvicorn app.main:app --host 0.0.0.0 --port 8000
 python -m app.main --host 0.0.0.0 --port 8000 --temperature 0.2
 ```
 
+若你遇到「雜訊被誤轉成重複文字」的情況，可使用以下抗重複參數（預設值已偏向保守）：
+
+```bash
+WHISPER_VAD_FILTER=true
+WHISPER_COMPRESSION_RATIO_THRESHOLD=2.2
+WHISPER_NO_SPEECH_THRESHOLD=0.6
+WHISPER_TEMPERATURE_SCHEDULE=0.0,0.2,0.4,0.6
+```
+
+- `WHISPER_VAD_FILTER`：啟用 faster-whisper 的 VAD 前處理（預設 `true`）。
+- `WHISPER_COMPRESSION_RATIO_THRESHOLD`：壓縮率門檻（預設 `2.2`，低於舊預設 `2.4`）。
+- `WHISPER_NO_SPEECH_THRESHOLD`：無聲門檻（預設 `0.6`）。
+- `WHISPER_TEMPERATURE_SCHEDULE`：當 API request 沒帶 `temperature` 時，改用溫度退火序列（例如 `0.0,0.2,0.4,0.6`）。
+
+> 注意：上述 VAD 與 threshold 參數會作用在 faster-whisper 路徑；若走 `openvino-genai` 的 `WhisperPipeline`，目前僅會套用 `temperature`（由 openvino-genai 支援範圍決定）。
+
 ## GPU 支援確認參數（新增）
 
 API 新增 `require_gpu`（`true/false`，預設 `false`）：

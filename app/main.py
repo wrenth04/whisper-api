@@ -46,16 +46,19 @@ app = FastAPI(title="Whisper OpenAI-Compatible API")
 logger = logging.getLogger(__name__)
 
 
-def _default_temperature() -> float:
-    raw = os.getenv("WHISPER_TEMPERATURE", "0.0").strip()
+def _default_temperature() -> Optional[float]:
+    raw = os.getenv("WHISPER_TEMPERATURE")
+    if raw is None or not raw.strip():
+        return None
+    raw = raw.strip()
     try:
         value = float(raw)
     except ValueError:
-        logger.warning("Invalid WHISPER_TEMPERATURE=%s, fallback to 0.0", raw)
-        return 0.0
+        logger.warning("Invalid WHISPER_TEMPERATURE=%s, fallback to model defaults", raw)
+        return None
     if value < 0 or value > 1:
-        logger.warning("Out-of-range WHISPER_TEMPERATURE=%s, fallback to 0.0", raw)
-        return 0.0
+        logger.warning("Out-of-range WHISPER_TEMPERATURE=%s, fallback to model defaults", raw)
+        return None
     return value
 
 
@@ -120,7 +123,7 @@ async def create_transcription(
         raise ApiError("No audio file was provided.", code="missing_file")
 
     resolved_temperature = _default_temperature() if temperature is None else temperature
-    if resolved_temperature < 0 or resolved_temperature > 1:
+    if resolved_temperature is not None and (resolved_temperature < 0 or resolved_temperature > 1):
         raise ApiError("temperature must be between 0 and 1.", code="invalid_temperature")
 
     audio_bytes = await file.read()
