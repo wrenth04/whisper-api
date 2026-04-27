@@ -139,7 +139,7 @@ def _resolve_engine(requested: RequestedDevice) -> EngineDebugInfo:
 
 def _model_runtime_args(engine: EngineDebugInfo, compute_type: Optional[str] = None) -> tuple[str, str]:
     if engine.resolved == "intel_gpu":
-        return "auto", compute_type or "int8_float16"
+        return "openvino", compute_type or "int8"
     return "cpu", "int8"
 
 
@@ -162,12 +162,14 @@ def _get_model(model_name: str, engine: EngineDebugInfo, compute_type: Optional[
             compute_type,
             cpu_threads,
         )
-        _MODEL_CACHE[cache_key] = WhisperModel(
-            model_name,
-            device=device,
-            compute_type=compute_type,
-            cpu_threads=cpu_threads,
-        )
+        model_kwargs: dict[str, Any] = {
+            "device": device,
+            "compute_type": compute_type,
+            "cpu_threads": cpu_threads,
+        }
+        if device == "openvino":
+            model_kwargs["device_index"] = 0
+        _MODEL_CACHE[cache_key] = WhisperModel(model_name, **model_kwargs)
     else:
         logger.info(
             "whisper_model_init cache_hit model=%s requested=%s resolved=%s backend=%s device=%s compute_type=%s cpu_threads=%s",
@@ -577,6 +579,8 @@ def transcribe_audio(
                 language=language,
                 initial_prompt=prompt,
                 temperature=temperature,
+                beam_size=5,
+                vad_filter=True,
             )
         except Exception as exc:
             if engine.resolved != "intel_gpu":
@@ -597,6 +601,8 @@ def transcribe_audio(
                 language=language,
                 initial_prompt=prompt,
                 temperature=temperature,
+                beam_size=5,
+                vad_filter=True,
             )
 
         segment_results: List[SegmentResult] = []

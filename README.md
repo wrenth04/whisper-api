@@ -10,6 +10,8 @@
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+# 若要明確啟用 faster-whisper OpenVINO 後端，可額外安裝：
+pip install "faster-whisper[openvino]"
 ```
 
 ### 打包/部署前必要 include 檢查
@@ -84,6 +86,16 @@ python -c "from openvino import Core; print(Core().available_devices)"
 - `cpu`：直接走 CPU。
 
 另外，模型建立時會**顯式**傳入 `device` 與 `compute_type`，不依賴預設值。
+在 Linux/Windows 的 Intel GPU 路徑，`faster-whisper` 會使用：
+
+- `device="openvino"`
+- `device_index=0`
+- `compute_type="int8"`
+
+並在轉錄時固定啟用：
+
+- `beam_size=5`
+- `vad_filter=true`（使用 Silero VAD，降低重複片段並改善速度）
 
 ### 模型名稱相容性（Groq/OpenAI client）
 
