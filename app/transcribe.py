@@ -317,7 +317,20 @@ def _transcribe_with_openvino_model(
     if language:
         generate_kwargs["language"] = language
     generate_kwargs["prompt"] = prompt or ""
-    result: Any = pipe.generate(audio_input, **generate_kwargs)
+    try:
+        result: Any = pipe.generate(audio_input, **generate_kwargs)
+    except RuntimeError as exc:
+        err_msg = str(exc)
+        if "lang_to_id" not in err_msg or "language" not in err_msg or "language" not in generate_kwargs:
+            raise
+        logger.warning(
+            "whisper_openvino_language_unsupported retry_without_language model=%s language=%s err=%s",
+            model_name,
+            generate_kwargs.get("language"),
+            err_msg,
+        )
+        generate_kwargs.pop("language", None)
+        result = pipe.generate(audio_input, **generate_kwargs)
 
     text = ""
     language_out: Optional[str] = language
