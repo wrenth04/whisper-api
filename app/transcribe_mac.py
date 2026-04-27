@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import platform
+import re
 import tempfile
 from dataclasses import dataclass
 from typing import Any, List, Literal, Optional
@@ -45,6 +46,36 @@ class GpuNotAvailableError(RuntimeError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(f"GPU not available: {reason}")
+
+
+def _normalize_for_repeat_check(text: str) -> str:
+    normalized = re.sub(r"\s+", "", text.strip().lower())
+    normalized = re.sub(r"[^\w\u4e00-\u9fff]", "", normalized)
+    return normalized
+
+
+def _dedupe_adjacent_segments(segments: List[SegmentResult]) -> List[SegmentResult]:
+    if not segments:
+        return segments
+
+    deduped: List[SegmentResult] = []
+    for seg in segments:
+        if not deduped:
+            deduped.append(seg)
+            continue
+
+        prev = deduped[-1]
+        prev_norm = _normalize_for_repeat_check(prev.text)
+        curr_norm = _normalize_for_repeat_check(seg.text)
+        if prev_norm and curr_norm and prev_norm == curr_norm:
+            prev.end = max(prev.end, seg.end)
+            continue
+
+        deduped.append(seg)
+
+    for idx, seg in enumerate(deduped):
+        seg.id = idx
+    return deduped
 
 
 _MODEL_CACHE: dict[str, WhisperModel] = {}
@@ -228,7 +259,6 @@ def _transcribe_with_mlx(
     if result is None and last_exc is not None:
         raise last_exc
 
-    text = str(result.get("text", "")).strip()
     language_out = result.get("language")
 
     segments: List[SegmentResult] = []
@@ -243,6 +273,9 @@ def _transcribe_with_mlx(
             )
         )
 
+    segments = _dedupe_adjacent_segments(segments)
+    text = " ".join(seg.text for seg in segments if seg.text).strip()
+
     duration = None
     if segments:
         duration = max(s.end for s in segments)
@@ -255,7 +288,7 @@ def transcribe_audio(
     model_name: str,
     language: Optional[str] = None,
     prompt: Optional[str] = None,
-    temperature: float = 0.0,
+    temperature: float = 0.3,
     include_debug: bool = False,
     require_gpu: bool = False,
 ) -> TranscriptionResult:
@@ -308,13 +341,11 @@ def transcribe_audio(
                     temperature=temperature,
                 )
                 segments = []
-                texts: List[str] = []
                 for idx, seg in enumerate(raw_segments):
                     cleaned = seg.text.strip()
-                    if cleaned:
-                        texts.append(cleaned)
                     segments.append(SegmentResult(id=idx, start=float(seg.start), end=float(seg.end), text=cleaned))
-                text = " ".join(texts).strip()
+                segments = _dedupe_adjacent_segments(segments)
+                text = " ".join(seg.text for seg in segments if seg.text).strip()
                 language_out = getattr(info, "language", language)
                 duration = getattr(info, "duration", None)
         else:
@@ -326,13 +357,11 @@ def transcribe_audio(
                 temperature=temperature,
             )
             segments = []
-            texts = []
             for idx, seg in enumerate(raw_segments):
                 cleaned = seg.text.strip()
-                if cleaned:
-                    texts.append(cleaned)
                 segments.append(SegmentResult(id=idx, start=float(seg.start), end=float(seg.end), text=cleaned))
-            text = " ".join(texts).strip()
+            segments = _dedupe_adjacent_segments(segments)
+            text = " ".join(seg.text for seg in segments if seg.text).strip()
             language_out = getattr(info, "language", language)
             duration = getattr(info, "duration", None)
 

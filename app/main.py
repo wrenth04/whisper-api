@@ -46,6 +46,33 @@ app = FastAPI(title="Whisper OpenAI-Compatible API")
 logger = logging.getLogger(__name__)
 
 
+PROMPT_PRESETS: dict[str, str] = {
+    "none": "",
+    "recommended": (
+        "請忠實轉寫原語言內容，不要翻譯。"
+        "避免重複相同語句。"
+        "保留自然標點。"
+    ),
+    "strict_no_repeat": (
+        "請逐字轉寫原語言內容，不要翻譯。"
+        "同一句話只輸出一次，禁止重複。"
+        "若聽不清楚，使用 [inaudible]。"
+    ),
+}
+
+
+def _build_effective_prompt(prompt: Optional[str], prompt_preset: str) -> Optional[str]:
+    base = (prompt or "").strip()
+    preset_text = PROMPT_PRESETS.get(prompt_preset, "")
+    if base and preset_text:
+        return f"{base}\n{preset_text}"
+    if base:
+        return base
+    if preset_text:
+        return preset_text
+    return None
+
+
 class ApiError(Exception):
     def __init__(
         self,
@@ -98,8 +125,9 @@ async def create_transcription(
     model: str = Form(...),
     language: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
+    prompt_preset: Literal["none", "recommended", "strict_no_repeat"] = Form("recommended"),
     response_format: Literal["json", "verbose_json"] = Form("json"),
-    temperature: float = Form(0.0),
+    temperature: float = Form(0.3),
     include_debug: bool = Form(False),
     require_gpu: bool = Form(False),
 ):
@@ -112,13 +140,14 @@ async def create_transcription(
     audio_bytes = await file.read()
     if not audio_bytes:
         raise ApiError("Uploaded file is empty.", code="empty_file")
+    effective_prompt = _build_effective_prompt(prompt, prompt_preset)
 
     try:
         result = transcribe_audio(
             audio_bytes=audio_bytes,
             model_name=model,
             language=language,
-            prompt=prompt,
+            prompt=effective_prompt,
             temperature=temperature,
             include_debug=include_debug,
             require_gpu=require_gpu,

@@ -474,7 +474,7 @@ def transcribe_audio(
     model_name: str,
     language: Optional[str] = None,
     prompt: Optional[str] = None,
-    temperature: float = 0.0,
+    temperature: float = 0.3,
     include_debug: bool = False,
     require_gpu: bool = False,
 ) -> TranscriptionResult:

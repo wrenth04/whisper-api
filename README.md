@@ -173,6 +173,30 @@ curl http://127.0.0.1:8000/v1/audio/transcriptions \
 LOG_LEVEL=DEBUG uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+## Prompt 建議與可選預設（新增）
+
+你可以使用原本的 `prompt` 欄位自訂指令；另外 API 新增 `prompt_preset` 參數來快速套用建議語句：
+
+- `none`：不附加預設提示。
+- `recommended`（預設）：加入「忠實轉寫、不翻譯、避免重複、保留標點」。
+- `strict_no_repeat`：更嚴格地要求「同一句只輸出一次」，聽不清楚時輸出 `[inaudible]`。
+
+可同時提供 `prompt` + `prompt_preset`，服務會把兩者合併（你的 `prompt` 在前，preset 在後）。
+
+範例：
+
+```bash
+curl http://127.0.0.1:8000/v1/audio/transcriptions \
+  -X POST \
+  -F "file=@/path/to/audio.wav" \
+  -F "model=small" \
+  -F "language=zh" \
+  -F "prompt=以下內容是訪談逐字稿，保留口語停頓。" \
+  -F "prompt_preset=strict_no_repeat" \
+  -F "temperature=0.3" \
+  -F "response_format=json"
+```
+
 CPU 路徑預設會使用約 80% 邏輯核心（`cpu_threads = floor(os.cpu_count() * 0.8)`），並在 log 輸出 `whisper_cpu_threads_config`。若要覆寫，可設定環境變數，或在啟動 server 時直接帶參數：
 
 ```bash
