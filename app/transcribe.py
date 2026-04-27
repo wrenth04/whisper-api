@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import platform
 import tempfile
@@ -58,6 +59,25 @@ def _resolve_device() -> RequestedDevice:
     return "auto"
 
 
+def _cpu_threads_target() -> int:
+    cpu_count = os.cpu_count() or 1
+    raw_ratio = os.getenv("WHISPER_CPU_USAGE_RATIO", "0.8").strip()
+    try:
+        ratio = float(raw_ratio)
+    except ValueError:
+        logger.warning("Invalid WHISPER_CPU_USAGE_RATIO=%s, fallback to 0.8", raw_ratio)
+        ratio = 0.8
+    ratio = min(max(ratio, 0.1), 1.0)
+    threads = max(1, math.floor(cpu_count * ratio))
+    logger.info(
+        "whisper_cpu_threads_config cpu_count=%s ratio=%.2f threads=%s",
+        cpu_count,
+        ratio,
+        threads,
+    )
+    return threads
+
+
 def _probe_openvino_gpu() -> tuple[bool, str]:
     try:
         from openvino import Core
@@ -113,18 +133,41 @@ def _model_runtime_args(engine: EngineDebugInfo, compute_type: Optional[str] = N
     return "cpu", "int8"
 
 
-def _model_cache_key(model_name: str, device: str, compute_type: str) -> str:
-    return f"{model_name}|{device}|{compute_type}"
+def _model_cache_key(model_name: str, device: str, compute_type: str, cpu_threads: int) -> str:
+    return f"{model_name}|{device}|{compute_type}|cpu_threads={cpu_threads}"
 
 
 def _get_model(model_name: str, engine: EngineDebugInfo, compute_type: Optional[str] = None) -> WhisperModel:
     device, compute_type = _model_runtime_args(engine, compute_type=compute_type)
-    cache_key = _model_cache_key(model_name, device, compute_type)
+    cpu_threads = _cpu_threads_target()
+    cache_key = _model_cache_key(model_name, device, compute_type, cpu_threads)
     if cache_key not in _MODEL_CACHE:
+        logger.info(
+            "whisper_model_init cache_miss model=%s requested=%s resolved=%s backend=%s device=%s compute_type=%s cpu_threads=%s",
+            model_name,
+            engine.requested,
+            engine.resolved,
+            engine.backend,
+            device,
+            compute_type,
+            cpu_threads,
+        )
         _MODEL_CACHE[cache_key] = WhisperModel(
             model_name,
             device=device,
             compute_type=compute_type,
+            cpu_threads=cpu_threads,
+        )
+    else:
+        logger.info(
+            "whisper_model_init cache_hit model=%s requested=%s resolved=%s backend=%s device=%s compute_type=%s cpu_threads=%s",
+            model_name,
+            engine.requested,
+            engine.resolved,
+            engine.backend,
+            device,
+            compute_type,
+            cpu_threads,
         )
     return _MODEL_CACHE[cache_key]
 
@@ -162,6 +205,14 @@ def transcribe_audio(
 ) -> TranscriptionResult:
     requested = _resolve_device()
     engine = _resolve_engine(requested)
+    logger.info(
+        "whisper_engine_resolved requested=%s resolved=%s backend=%s reason=%s require_gpu=%s",
+        engine.requested,
+        engine.resolved,
+        engine.backend,
+        engine.reason,
+        require_gpu,
+    )
     if require_gpu and engine.resolved != "intel_gpu":
         raise GpuNotAvailableError(engine.reason)
 
@@ -175,16 +226,33 @@ def transcribe_audio(
             init_errors: List[str] = []
             for gpu_compute_type in _gpu_compute_type_candidates():
                 try:
+                    logger.info(
+                        "whisper_gpu_init_try model=%s compute_type=%s",
+                        model_name,
+                        gpu_compute_type,
+                    )
                     model = _get_model(model_name, engine, compute_type=gpu_compute_type)
+                    logger.info(
+                        "whisper_gpu_init_ok model=%s compute_type=%s",
+                        model_name,
+                        gpu_compute_type,
+                    )
                     break
                 except ValueError as exc:
                     init_errors.append(f"{gpu_compute_type}:{exc.__class__.__name__}:{exc}")
+                    logger.warning(
+                        "whisper_gpu_init_failed model=%s compute_type=%s err=%s",
+                        model_name,
+                        gpu_compute_type,
+                        exc,
+                    )
                     if not _is_unsupported_gpu_compute_error(exc):
                         raise
             if model is None:
                 reason = f"{engine.reason};model_init_failed:{' | '.join(init_errors)}"
                 if require_gpu:
                     raise GpuNotAvailableError(reason)
+                logger.warning("whisper_gpu_fallback reason=%s", reason)
                 engine = _fallback_to_cpu(engine, reason)
                 model = _get_model(model_name, engine)
         else:
@@ -203,6 +271,11 @@ def transcribe_audio(
                 raise GpuNotAvailableError(
                     f"{engine.reason};transcribe_failed:{exc.__class__.__name__}:{exc}"
                 ) from exc
+            logger.warning(
+                "whisper_gpu_transcribe_failed fallback_to_cpu err_type=%s err=%s",
+                exc.__class__.__name__,
+                exc,
+            )
             engine = _fallback_to_cpu(engine, f"transcribe_failed:{exc.__class__.__name__}")
             model = _get_model(model_name, engine)
             segments, info = model.transcribe(

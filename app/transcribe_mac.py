@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import platform
 import tempfile
@@ -63,6 +64,25 @@ def _resolve_device() -> RequestedDevice:
     return "auto"
 
 
+def _cpu_threads_target() -> int:
+    cpu_count = os.cpu_count() or 1
+    raw_ratio = os.getenv("WHISPER_CPU_USAGE_RATIO", "0.8").strip()
+    try:
+        ratio = float(raw_ratio)
+    except ValueError:
+        logger.warning("Invalid WHISPER_CPU_USAGE_RATIO=%s, fallback to 0.8", raw_ratio)
+        ratio = 0.8
+    ratio = min(max(ratio, 0.1), 1.0)
+    threads = max(1, math.floor(cpu_count * ratio))
+    logger.info(
+        "whisper_cpu_threads_config cpu_count=%s ratio=%.2f threads=%s",
+        cpu_count,
+        ratio,
+        threads,
+    )
+    return threads
+
+
 def _is_macos_arm64() -> bool:
     return platform.system() == "Darwin" and platform.machine() in {"arm64", "aarch64"}
 
@@ -100,14 +120,31 @@ def _resolve_engine(requested: RequestedDevice) -> EngineDebugInfo:
     return EngineDebugInfo(requested=requested, resolved="cpu", backend="ctranslate2", reason=reason)
 
 
-def _model_cache_key(model_name: str) -> str:
-    return f"{model_name}|cpu|int8"
+def _model_cache_key(model_name: str, cpu_threads: int) -> str:
+    return f"{model_name}|cpu|int8|cpu_threads={cpu_threads}"
 
 
 def _get_cpu_model(model_name: str) -> WhisperModel:
-    cache_key = _model_cache_key(model_name)
+    cpu_threads = _cpu_threads_target()
+    cache_key = _model_cache_key(model_name, cpu_threads)
     if cache_key not in _MODEL_CACHE:
-        _MODEL_CACHE[cache_key] = WhisperModel(model_name, device="cpu", compute_type="int8")
+        logger.info(
+            "whisper_cpu_model_init cache_miss model=%s device=cpu compute_type=int8 cpu_threads=%s",
+            model_name,
+            cpu_threads,
+        )
+        _MODEL_CACHE[cache_key] = WhisperModel(
+            model_name,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=cpu_threads,
+        )
+    else:
+        logger.info(
+            "whisper_cpu_model_init cache_hit model=%s device=cpu compute_type=int8 cpu_threads=%s",
+            model_name,
+            cpu_threads,
+        )
     return _MODEL_CACHE[cache_key]
 
 
@@ -160,6 +197,14 @@ def transcribe_audio(
 ) -> TranscriptionResult:
     requested = _resolve_device()
     engine = _resolve_engine(requested)
+    logger.info(
+        "whisper_engine_resolved requested=%s resolved=%s backend=%s reason=%s require_gpu=%s",
+        engine.requested,
+        engine.resolved,
+        engine.backend,
+        engine.reason,
+        require_gpu,
+    )
     if require_gpu and engine.resolved != "apple_gpu":
         raise GpuNotAvailableError(engine.reason)
 
@@ -170,6 +215,7 @@ def transcribe_audio(
     try:
         if engine.resolved == "apple_gpu":
             try:
+                logger.info("whisper_apple_gpu_transcribe_start model=%s", model_name)
                 text, language_out, duration, segments = _transcribe_with_mlx(
                     temp_path=temp_path,
                     model_name=model_name,
@@ -177,7 +223,13 @@ def transcribe_audio(
                     prompt=prompt,
                     temperature=temperature,
                 )
+                logger.info("whisper_apple_gpu_transcribe_ok model=%s", model_name)
             except Exception as exc:
+                logger.warning(
+                    "whisper_apple_gpu_transcribe_failed fallback_to_cpu err_type=%s err=%s",
+                    exc.__class__.__name__,
+                    exc,
+                )
                 engine = EngineDebugInfo(
                     requested=engine.requested,
                     resolved="cpu",
@@ -220,6 +272,7 @@ def transcribe_audio(
             language_out = getattr(info, "language", language)
             duration = getattr(info, "duration", None)
 
+        logger.info("whisper_engine_final requested=%s resolved=%s backend=%s reason=%s", engine.requested, engine.resolved, engine.backend, engine.reason)
         return TranscriptionResult(
             text=text,
             language=language_out,
