@@ -97,25 +97,6 @@ def _cpu_threads_target() -> int:
     return threads
 
 
-def _openvino_cpu_threads_target() -> int:
-    cpu_count = os.cpu_count() or 1
-    raw_ratio = os.getenv("WHISPER_OPENVINO_CPU_USAGE_RATIO", "1.0").strip()
-    try:
-        ratio = float(raw_ratio)
-    except ValueError:
-        logger.warning("Invalid WHISPER_OPENVINO_CPU_USAGE_RATIO=%s, fallback to 1.0", raw_ratio)
-        ratio = 1.0
-    ratio = min(max(ratio, 0.1), 1.0)
-    threads = max(1, math.floor(cpu_count * ratio))
-    logger.info(
-        "whisper_openvino_cpu_threads_config cpu_count=%s ratio=%.2f threads=%s",
-        cpu_count,
-        ratio,
-        threads,
-    )
-    return threads
-
-
 def _probe_openvino_gpu() -> tuple[bool, str]:
     try:
         from openvino import Core
@@ -340,7 +321,7 @@ def _apply_openvino_thread_hints(pipeline_device: str) -> None:
     if "CPU" not in pipeline_device.upper():
         return
 
-    threads = _openvino_cpu_threads_target()
+    threads = _cpu_threads_target()
     if not os.getenv("OMP_NUM_THREADS"):
         os.environ["OMP_NUM_THREADS"] = str(threads)
     if not os.getenv("OPENVINO_INFERENCE_NUM_THREADS"):

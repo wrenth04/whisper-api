@@ -94,7 +94,6 @@ python -c "from openvino import Core; print(Core().available_devices)"
 可用環境變數：
 - `WHISPER_OPENVINO_CACHE_DIR`：自訂 OpenVINO 模型下載目錄（預設 `~/.cache/whisper-api`）。
 - `WHISPER_OPENVINO_PIPELINE_DEVICE`：指定 `openvino-genai WhisperPipeline` 裝置字串（預設 `AUTO:GPU,CPU`，可讓 OpenVINO 在 GPU/CPU 間自動調度）。
-- `WHISPER_OPENVINO_CPU_USAGE_RATIO`：當 `WhisperPipeline` 裝置包含 CPU（例如 `AUTO:GPU,CPU`）時，設定 CPU 執行緒比例（預設 `1.0`，即盡量吃滿 CPU）。
 - `HF_TOKEN`（或 `HUGGINGFACE_HUB_TOKEN`）：提高 Hugging Face 下載速率上限，減少 unauthenticated warning。
 
 ## OpenVINO 相容矩陣與環境限制
