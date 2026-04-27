@@ -300,6 +300,44 @@ def _download_openvino_model_snapshot(model_name: str) -> str:
     return str(model_cache_dir)
 
 
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _extract_chunk_times(chunk: Any) -> tuple[float, float]:
+    # Compatibility for different openvino-genai chunk fields across versions.
+    direct_start = getattr(chunk, "start", None)
+    direct_end = getattr(chunk, "end", None)
+    if direct_start is not None or direct_end is not None:
+        return _coerce_float(direct_start, 0.0), _coerce_float(direct_end, _coerce_float(direct_start, 0.0))
+
+    for start_key, end_key in (("start_ts", "end_ts"), ("start_time", "end_time")):
+        if hasattr(chunk, start_key) or hasattr(chunk, end_key):
+            start = _coerce_float(getattr(chunk, start_key, 0.0), 0.0)
+            end = _coerce_float(getattr(chunk, end_key, start), start)
+            return start, end
+
+    timestamp = getattr(chunk, "timestamp", None)
+    if isinstance(timestamp, (list, tuple)) and len(timestamp) >= 2:
+        start = _coerce_float(timestamp[0], 0.0)
+        end = _coerce_float(timestamp[1], start)
+        return start, end
+    if isinstance(timestamp, dict):
+        start = _coerce_float(timestamp.get("start", 0.0), 0.0)
+        end = _coerce_float(timestamp.get("end", start), start)
+        return start, end
+
+    if isinstance(chunk, dict):
+        start = _coerce_float(chunk.get("start", chunk.get("start_ts", 0.0)), 0.0)
+        end = _coerce_float(chunk.get("end", chunk.get("end_ts", start)), start)
+        return start, end
+
+    return 0.0, 0.0
+
+
 def _transcribe_with_openvino_model(
     temp_path: str,
     model_name: str,
@@ -313,7 +351,7 @@ def _transcribe_with_openvino_model(
     model_path = _download_openvino_model_snapshot(model_name)
     pipe = ov_genai.WhisperPipeline(model_path, "GPU")
     audio_input = decode_audio(temp_path)
-    generate_kwargs: dict[str, Any] = {"temperature": temperature}
+    generate_kwargs: dict[str, Any] = {"temperature": temperature, "return_timestamps": True}
     # openvino-genai rejects None for some optional args; use safe defaults.
     if language:
         supported_languages = _load_openvino_supported_languages(model_path)
@@ -330,6 +368,18 @@ def _transcribe_with_openvino_model(
     generate_kwargs["prompt"] = prompt or ""
     try:
         result: Any = pipe.generate(audio_input, **generate_kwargs)
+    except TypeError as exc:
+        # Some openvino-genai versions do not support return_timestamps kwargs.
+        if "return_timestamps" not in generate_kwargs:
+            raise
+        logger.warning(
+            "whisper_openvino_no_return_timestamps_kwarg model=%s err_type=%s err=%s",
+            model_name,
+            exc.__class__.__name__,
+            exc,
+        )
+        generate_kwargs.pop("return_timestamps", None)
+        result = pipe.generate(audio_input, **generate_kwargs)
     except RuntimeError as exc:
         err_msg = str(exc)
         if "lang_to_id" not in err_msg or "language" not in err_msg or "language" not in generate_kwargs:
@@ -361,9 +411,11 @@ def _transcribe_with_openvino_model(
     raw_chunks = getattr(result, "chunks", None) or getattr(result, "segments", None)
     if raw_chunks:
         for idx, chunk in enumerate(raw_chunks):
-            start = float(getattr(chunk, "start", 0.0))
-            end = float(getattr(chunk, "end", 0.0))
-            chunk_text = str(getattr(chunk, "text", "")).strip()
+            start, end = _extract_chunk_times(chunk)
+            if isinstance(chunk, dict):
+                chunk_text = str(chunk.get("text", "")).strip()
+            else:
+                chunk_text = str(getattr(chunk, "text", "")).strip()
             segments.append(SegmentResult(id=idx, start=start, end=end, text=chunk_text))
         if segments:
             duration = max(s.end for s in segments)
