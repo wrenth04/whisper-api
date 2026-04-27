@@ -46,6 +46,19 @@ app = FastAPI(title="Whisper OpenAI-Compatible API")
 logger = logging.getLogger(__name__)
 
 
+def _default_temperature() -> float:
+    raw = os.getenv("WHISPER_TEMPERATURE", "0.0").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid WHISPER_TEMPERATURE=%s, fallback to 0.0", raw)
+        return 0.0
+    if value < 0 or value > 1:
+        logger.warning("Out-of-range WHISPER_TEMPERATURE=%s, fallback to 0.0", raw)
+        return 0.0
+    return value
+
+
 class ApiError(Exception):
     def __init__(
         self,
@@ -99,14 +112,15 @@ async def create_transcription(
     language: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
     response_format: Literal["json", "verbose_json"] = Form("json"),
-    temperature: float = Form(0.0),
+    temperature: Optional[float] = Form(None),
     include_debug: bool = Form(False),
     require_gpu: bool = Form(False),
 ):
     if not file.filename:
         raise ApiError("No audio file was provided.", code="missing_file")
 
-    if temperature < 0 or temperature > 1:
+    resolved_temperature = _default_temperature() if temperature is None else temperature
+    if resolved_temperature < 0 or resolved_temperature > 1:
         raise ApiError("temperature must be between 0 and 1.", code="invalid_temperature")
 
     audio_bytes = await file.read()
@@ -119,7 +133,7 @@ async def create_transcription(
             model_name=model,
             language=language,
             prompt=prompt,
-            temperature=temperature,
+            temperature=resolved_temperature,
             include_debug=include_debug,
             require_gpu=require_gpu,
             source_filename=file.filename,
@@ -156,12 +170,22 @@ def main() -> int:
         default=None,
         help="Set WHISPER_CPU_USAGE_RATIO for CPU thread usage (range: 0.1 ~ 1.0).",
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Set default transcription temperature (range: 0.0 ~ 1.0).",
+    )
     args = parser.parse_args()
 
     if args.cpu_usage_ratio is not None:
         if args.cpu_usage_ratio < 0.1 or args.cpu_usage_ratio > 1.0:
             parser.error("--cpu-usage-ratio must be between 0.1 and 1.0")
         os.environ["WHISPER_CPU_USAGE_RATIO"] = f"{args.cpu_usage_ratio:.4g}"
+    if args.temperature is not None:
+        if args.temperature < 0.0 or args.temperature > 1.0:
+            parser.error("--temperature must be between 0.0 and 1.0")
+        os.environ["WHISPER_TEMPERATURE"] = f"{args.temperature:.4g}"
 
     if not logging.getLogger().handlers:
         logging.basicConfig(
@@ -169,11 +193,12 @@ def main() -> int:
             format="%(asctime)s %(levelname)s %(name)s - %(message)s",
         )
     logger.info(
-        "whisper_api_start host=%s port=%s check_gpu=%s cpu_usage_ratio=%s",
+        "whisper_api_start host=%s port=%s check_gpu=%s cpu_usage_ratio=%s temperature=%s",
         args.host,
         args.port,
         args.check_gpu,
         os.getenv("WHISPER_CPU_USAGE_RATIO", "0.8"),
+        os.getenv("WHISPER_TEMPERATURE", "0.0"),
     )
 
     if args.check_gpu:
