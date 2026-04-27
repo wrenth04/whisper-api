@@ -48,6 +48,19 @@ class GpuNotAvailableError(RuntimeError):
 
 
 _MODEL_CACHE: dict[str, WhisperModel] = {}
+_MLX_MODEL_NAME_ALIASES: dict[str, str] = {
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "tiny.en": "mlx-community/whisper-tiny.en-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "base.en": "mlx-community/whisper-base.en-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "small.en": "mlx-community/whisper-small.en-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "medium.en": "mlx-community/whisper-medium.en-mlx",
+    "large-v2": "mlx-community/whisper-large-v2-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+}
 
 
 def _resolve_device() -> RequestedDevice:
@@ -148,6 +161,35 @@ def _get_cpu_model(model_name: str) -> WhisperModel:
     return _MODEL_CACHE[cache_key]
 
 
+def _mlx_model_candidates(model_name: str) -> List[str]:
+    normalized = model_name.strip()
+    if "/" in normalized:
+        return [normalized]
+
+    alias = _MLX_MODEL_NAME_ALIASES.get(normalized)
+    if alias and alias != normalized:
+        return [alias, normalized]
+    return [normalized]
+
+
+def _is_hf_repo_access_error(exc: Exception) -> bool:
+    exc_name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    hf_error_keywords = {
+        "repositorynotfounderror",
+        "gatedrepoerror",
+        "revisionnotfounderror",
+        "entrynotfounderror",
+        "hfhubhttperror",
+    }
+    return (
+        exc_name in hf_error_keywords
+        or "401" in message
+        or "repository not found" in message
+        or "unauthorized" in message
+    )
+
+
 def _transcribe_with_mlx(
     temp_path: str,
     model_name: str,
@@ -157,13 +199,35 @@ def _transcribe_with_mlx(
 ) -> tuple[str, Optional[str], Optional[float], List[SegmentResult]]:
     import mlx_whisper
 
-    result: Any = mlx_whisper.transcribe(
-        temp_path,
-        path_or_hf_repo=model_name,
-        language=language,
-        initial_prompt=prompt,
-        temperature=temperature,
-    )
+    last_exc: Optional[Exception] = None
+    result: Any = None
+    for idx, candidate in enumerate(_mlx_model_candidates(model_name)):
+        try:
+            logger.info("whisper_apple_gpu_model_try requested=%s candidate=%s", model_name, candidate)
+            result = mlx_whisper.transcribe(
+                temp_path,
+                path_or_hf_repo=candidate,
+                language=language,
+                initial_prompt=prompt,
+                temperature=temperature,
+            )
+            break
+        except Exception as exc:
+            last_exc = exc
+            if idx == 0 and candidate != model_name and _is_hf_repo_access_error(exc):
+                logger.warning(
+                    "whisper_apple_gpu_model_alias_retry requested=%s candidate=%s err_type=%s err=%s",
+                    model_name,
+                    candidate,
+                    exc.__class__.__name__,
+                    exc,
+                )
+                continue
+            raise
+
+    if result is None and last_exc is not None:
+        raise last_exc
+
     text = str(result.get("text", "")).strip()
     language_out = result.get("language")
 
