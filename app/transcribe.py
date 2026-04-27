@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import tempfile
+import json
 from pathlib import Path
 from dataclasses import asdict, dataclass
 from typing import Any, List, Literal, Optional
@@ -315,7 +316,17 @@ def _transcribe_with_openvino_model(
     generate_kwargs: dict[str, Any] = {"temperature": temperature}
     # openvino-genai rejects None for some optional args; use safe defaults.
     if language:
-        generate_kwargs["language"] = language
+        supported_languages = _load_openvino_supported_languages(model_path)
+        resolved_language = _resolve_openvino_language(language, supported_languages)
+        if resolved_language:
+            generate_kwargs["language"] = resolved_language
+        else:
+            logger.warning(
+                "whisper_openvino_language_not_supported use_auto_detect model=%s language=%s supported_count=%s",
+                model_name,
+                language,
+                len(supported_languages),
+            )
     generate_kwargs["prompt"] = prompt or ""
     try:
         result: Any = pipe.generate(audio_input, **generate_kwargs)
@@ -360,6 +371,50 @@ def _transcribe_with_openvino_model(
         segments.append(SegmentResult(id=0, start=0.0, end=0.0, text=text))
 
     return text, language_out, duration, segments
+
+
+def _load_openvino_supported_languages(model_path: str) -> set[str]:
+    config_path = Path(model_path) / "generation_config.json"
+    if not config_path.exists():
+        return set()
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("whisper_openvino_generation_config_parse_failed path=%s err=%s", config_path, exc)
+        return set()
+    lang_to_id = payload.get("lang_to_id")
+    if isinstance(lang_to_id, dict):
+        return {str(k) for k in lang_to_id.keys()}
+    return set()
+
+
+def _resolve_openvino_language(language: str, supported_languages: set[str]) -> Optional[str]:
+    normalized_input = language.strip().lower()
+    alias_map = {
+        "zh-cn": "zh",
+        "zh-tw": "zh",
+        "en-us": "en",
+        "en-gb": "en",
+        "pt-br": "pt",
+    }
+    candidates = [normalized_input]
+    if normalized_input in alias_map:
+        candidates.append(alias_map[normalized_input])
+
+    if not supported_languages:
+        return candidates[0]
+
+    normalized_supported: dict[str, str] = {}
+    for supported in supported_languages:
+        normalized_supported[supported.lower()] = supported
+        token_match = re.fullmatch(r"<\|([a-z]{2,3})\|>", supported.lower())
+        if token_match:
+            normalized_supported[token_match.group(1)] = supported
+
+    for candidate in candidates:
+        if candidate in normalized_supported:
+            return normalized_supported[candidate]
+    return None
 
 
 def transcribe_audio(
