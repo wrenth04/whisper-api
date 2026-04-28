@@ -3,7 +3,5 @@ uvicorn[standard]>=0.32.0,<1.0.0
 python-multipart>=0.0.9,<1.0.0
 pydantic>=2.9.0,<3.0.0
 faster-whisper>=1.1.0,<2.0.0
-openvino>=2024.3.0,<2027.0.0; platform_system != 'Darwin' or platform_machine != 'arm64'
-openvino_tokenizers>=2024.3.0,<2027.0.0; platform_system != 'Darwin' or platform_machine != 'arm64'
-openvino-genai>=2024.3.0,<2027.0.0; platform_system != 'Darwin' or platform_machine != 'arm64'
+ctranslate2>=4.4.0,<5.0.0
 mlx-whisper>=0.4.2; platform_system == 'Darwin' and platform_machine == 'arm64'
